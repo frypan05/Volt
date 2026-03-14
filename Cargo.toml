@@ -1,0 +1,25 @@
+[package]
+name = "aris"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[dependencies]
+anyhow = "1.0"
+arboard = { version = "3.4", default-features = false, features = ["wayland-data-control"] }
+crossterm = "0.28"
+ignore = "0.4"
+ratatui = "0.29"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
+thiserror = "2.0"
+tokio = { version = "1.44", features = ["full"] }
+toml = "0.8"
