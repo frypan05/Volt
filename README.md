@@ -1,6 +1,6 @@
-# Aris
+# volt
 
-Aris is a terminal-native API client inspired by `lazygit` and `lazydocker`.
+volt is a terminal-native API client inspired by `lazygit` and `lazydocker`.
 
 ## Features
 
@@ -8,7 +8,7 @@ Aris is a terminal-native API client inspired by `lazygit` and `lazydocker`.
 - Local route scanning for `axum`, `actix-web`, `express`, `fastify`, and `fastapi`
 - Async request execution with latency and payload metrics
 - JSON pretty-printing and syntax-aware response rendering
-- Clipboard copy for response bodies and lightweight `.aris.toml` persistence
+- Clipboard copy for response bodies and lightweight `.volt.toml` persistence
 
 ## Run
 
@@ -16,7 +16,7 @@ Aris is a terminal-native API client inspired by `lazygit` and `lazydocker`.
 cargo run
 ```
 
-Aris scans the current working directory and lists detected routes. By default requests target `http://localhost:3000`; edit the base URL with `u`.
+volt scans the current working directory and lists detected routes. By default requests target `http://localhost:3000`; edit the base URL with `u`.
 
 ## Keybindings
 

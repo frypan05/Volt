@@ -69,6 +69,24 @@ async fn run_app(
 }
 
 async fn handle_key(app: &mut App, key: KeyEvent) {
+    if app.search_active {
+        match key.code {
+            KeyCode::Esc => app.stop_search(),
+            KeyCode::Enter => {
+                app.search_active = false;
+                if app.search_query.is_empty() {
+                    app.status_message = "Ready".to_string();
+                } else {
+                    app.status_message = format!("Filtered {} routes", app.filtered_routes.len());
+                }
+            }
+            KeyCode::Backspace => app.on_search_backspace(),
+            KeyCode::Char(ch) => app.on_search_input(ch),
+            _ => {}
+        }
+        return;
+    }
+
     if app.input_mode {
         match key.code {
             KeyCode::Esc => app.stop_editing(),
@@ -100,6 +118,8 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('u') => app.start_editing(InputTarget::BaseUrl),
         KeyCode::Char('r') => app.execute_current_request().await,
         KeyCode::Char('c') => app.copy_response_to_clipboard(),
+        KeyCode::Char('/') => app.start_search(),
+        KeyCode::Char('x') => app.export_as_curl(),
         _ => {}
     }
 
