@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
-use crate::http::{self, HttpResult};
+use crate::http::{self, HttpResponse, HttpResult};
 use crate::scanner::{RouteInfo, ScannerReport};
-use crate::ui::highlight;
+use crate::ui::highlight::{self, ResponseView};
 
 // ---------------------------------------------------------------------------
 // HttpMethod
@@ -39,7 +39,6 @@ impl HttpMethod {
         Self::Options,
         Self::Head,
     ];
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Get => "GET",
@@ -51,15 +50,13 @@ impl HttpMethod {
             Self::Head => "HEAD",
         }
     }
-
     pub fn cycle_next(self) -> Self {
-        let idx = Self::ALL.iter().position(|m| *m == self).unwrap_or(0);
-        Self::ALL[(idx + 1) % Self::ALL.len()]
+        let i = Self::ALL.iter().position(|m| *m == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
     }
-
     pub fn cycle_prev(self) -> Self {
-        let idx = Self::ALL.iter().position(|m| *m == self).unwrap_or(0);
-        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+        let i = Self::ALL.iter().position(|m| *m == self).unwrap_or(0);
+        Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -71,8 +68,8 @@ impl fmt::Display for HttpMethod {
 
 impl TryFrom<&str> for HttpMethod {
     type Error = ();
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value.to_ascii_lowercase().as_str() {
+    fn try_from(v: &str) -> Result<Self, Self::Error> {
+        match v.to_ascii_lowercase().as_str() {
             "get" => Ok(Self::Get),
             "post" => Ok(Self::Post),
             "put" => Ok(Self::Put),
@@ -86,7 +83,7 @@ impl TryFrom<&str> for HttpMethod {
 }
 
 // ---------------------------------------------------------------------------
-// UI state enums
+// UI enums
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,12 +112,12 @@ impl EditorTab {
         }
     }
     pub fn next(self) -> Self {
-        let idx = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        Self::ALL[(idx + 1) % Self::ALL.len()]
+        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
     }
     pub fn prev(self) -> Self {
-        let idx = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -157,41 +154,41 @@ impl TextBuffer {
         if self.cursor == 0 {
             return;
         }
-        if let Some(prev) = self.text[..self.cursor]
+        if let Some(p) = self.text[..self.cursor]
             .char_indices()
             .last()
-            .map(|(idx, _)| idx)
+            .map(|(i, _)| i)
         {
-            self.text.drain(prev..self.cursor);
-            self.cursor = prev;
+            self.text.drain(p..self.cursor);
+            self.cursor = p;
         }
     }
     pub fn delete(&mut self) {
         if self.cursor >= self.text.len() {
             return;
         }
-        let next = self.text[self.cursor..]
+        let n = self.text[self.cursor..]
             .char_indices()
             .nth(1)
-            .map(|(idx, _)| self.cursor + idx)
+            .map(|(i, _)| self.cursor + i)
             .unwrap_or(self.text.len());
-        self.text.drain(self.cursor..next);
+        self.text.drain(self.cursor..n);
     }
     pub fn move_left(&mut self) {
-        if let Some(prev) = self.text[..self.cursor]
+        if let Some(p) = self.text[..self.cursor]
             .char_indices()
             .last()
-            .map(|(idx, _)| idx)
+            .map(|(i, _)| i)
         {
-            self.cursor = prev;
+            self.cursor = p;
         }
     }
     pub fn move_right(&mut self) {
         if self.cursor >= self.text.len() {
             return;
         }
-        if let Some((idx, ch)) = self.text[self.cursor..].char_indices().next() {
-            self.cursor += idx + ch.len_utf8();
+        if let Some((i, ch)) = self.text[self.cursor..].char_indices().next() {
+            self.cursor += i + ch.len_utf8();
         }
     }
     pub fn move_home(&mut self) {
@@ -206,19 +203,18 @@ impl TextBuffer {
     }
     pub fn split_at_cursor(&self) -> (&str, &str, &str) {
         if self.cursor >= self.text.len() {
-            (&self.text, " ", "")
-        } else {
-            let ch_end = self.text[self.cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor + i)
-                .unwrap_or(self.text.len());
-            (
-                &self.text[..self.cursor],
-                &self.text[self.cursor..ch_end],
-                &self.text[ch_end..],
-            )
+            return (&self.text, " ", "");
         }
+        let e = self.text[self.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| self.cursor + i)
+            .unwrap_or(self.text.len());
+        (
+            &self.text[..self.cursor],
+            &self.text[self.cursor..e],
+            &self.text[e..],
+        )
     }
 }
 
@@ -232,7 +228,6 @@ pub struct KVRow {
     pub value: TextBuffer,
     pub enabled: bool,
 }
-
 impl KVRow {
     pub fn new() -> Self {
         Self {
@@ -262,12 +257,12 @@ impl BodyType {
         }
     }
     pub fn next(self) -> Self {
-        let idx = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        Self::ALL[(idx + 1) % Self::ALL.len()]
+        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
     }
     pub fn prev(self) -> Self {
-        let idx = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -339,6 +334,19 @@ impl RequestDraft {
 }
 
 // ---------------------------------------------------------------------------
+// Channel messages
+// ---------------------------------------------------------------------------
+
+/// The HTTP task sends RawResult immediately when bytes arrive.
+/// A separate highlight task then sends HighlightResult.
+pub enum AppMsg {
+    /// Raw response — shown instantly, no highlighting yet.
+    RawResult(HttpResult),
+    /// Highlighted lines arrive separately, a few ms later.
+    HighlightResult(Vec<Line<'static>>),
+}
+
+// ---------------------------------------------------------------------------
 // ResponseState
 // ---------------------------------------------------------------------------
 
@@ -349,7 +357,11 @@ pub struct ResponseState {
     pub size_bytes: usize,
     pub content_type: String,
     pub body: String,
+    /// Starts as plain_lines() immediately; replaced by rich highlighting later.
     pub highlighted: Vec<Line<'static>>,
+    pub view: ResponseView,
+    /// True while the highlight task is still running.
+    pub highlight_pending: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +377,7 @@ pub struct App {
     pub editor_tab: EditorTab,
     pub input_mode: bool,
     pub input_target: InputTarget,
+    pub body_type_focused: bool,
     pub drafts: HashMap<String, RequestDraft>,
     pub url_history: Vec<String>,
     pub url_history_index: Option<usize>,
@@ -377,7 +390,7 @@ pub struct App {
     pub status_message: String,
     pub env_vars: HashMap<String, String>,
     pub clipboard: Option<Clipboard>,
-    pub request_tx: mpsc::UnboundedSender<HttpResult>,
+    pub msg_tx: mpsc::UnboundedSender<AppMsg>,
     pub custom_route_dialog: Option<CustomRouteDialog>,
     pub last_area: ratatui::layout::Rect,
     pub http_client: reqwest::Client,
@@ -400,19 +413,18 @@ impl App {
     pub fn new(
         report: ScannerReport,
         config: AppConfig,
-        request_tx: mpsc::UnboundedSender<HttpResult>,
+        msg_tx: mpsc::UnboundedSender<AppMsg>,
     ) -> Self {
         let routes = report.routes.clone();
         let _ = dotenvy::dotenv();
         let env_vars: HashMap<String, String> = std::env::vars().collect();
 
         let default_base_url = "http://localhost:3000".to_string();
-        let mut url_history: Vec<String> = vec![default_base_url.clone()];
+        let mut url_history = vec![default_base_url.clone()];
         if !config.base_url.is_empty() && config.base_url != default_base_url {
             url_history.insert(0, config.base_url.clone());
         }
 
-        // Built once; cloning is an Arc clone — shares the connection pool.
         let http_client = reqwest::Client::builder()
             .tcp_nodelay(true)
             .pool_max_idle_per_host(8)
@@ -430,6 +442,7 @@ impl App {
             editor_tab: EditorTab::Params,
             input_mode: false,
             input_target: InputTarget::Tab(EditorTab::Params),
+            body_type_focused: false,
             drafts: HashMap::new(),
             url_history,
             url_history_index: None,
@@ -442,7 +455,7 @@ impl App {
             status_message: "Ready".to_string(),
             env_vars,
             clipboard: Clipboard::new().ok(),
-            request_tx,
+            msg_tx,
             custom_route_dialog: None,
             last_area: ratatui::layout::Rect::default(),
             http_client,
@@ -486,7 +499,6 @@ impl App {
             self.viewer_scroll = self.viewer_scroll.saturating_add(1);
         }
     }
-
     pub fn scroll_viewer_page(&mut self, up: bool) {
         if up {
             self.viewer_scroll = self.viewer_scroll.saturating_sub(10);
@@ -495,14 +507,119 @@ impl App {
         }
     }
 
+    // -- Response view cycling ---------------------------------------------
+
+    /// Cycle view mode and immediately re-highlight from the stored body.
+    /// Because the body is already in RAM this is instant even for JSON.
+    pub fn cycle_response_view(&mut self, forward: bool) {
+        if self.response.body.is_empty() {
+            return;
+        }
+        self.response.view = if forward {
+            self.response.view.next()
+        } else {
+            self.response.view.prev()
+        };
+        // Kick off async highlight so we don't block the UI thread.
+        self.spawn_highlight_task();
+        // Show plain lines immediately as a placeholder until highlight arrives.
+        self.response.highlighted = highlight::plain_lines(&self.response.body);
+    }
+
+    // -- HTTP --------------------------------------------------------------
+
+    pub async fn execute_current_request(&mut self) {
+        let Some(route) = self.current_route().cloned() else {
+            return;
+        };
+        self.pending_request = true;
+        self.loader_tick = 0;
+        self.viewer_scroll = 0;
+        // Clear old response immediately so the UI shows the spinner.
+        self.response.highlighted = Vec::new();
+        self.response.body = String::new();
+        self.response.status_code = None;
+        self.response.latency_ms = None;
+
+        let draft = self.current_draft();
+        let tx = self.msg_tx.clone();
+        let client = self.http_client.clone();
+
+        tokio::spawn(async move {
+            let result = http::execute(client, route, draft).await;
+            // Send the raw result immediately — UI updates without waiting for highlighting.
+            let _ = tx.send(AppMsg::RawResult(result));
+        });
+    }
+
+    /// Called by apply_raw_result to start highlighting in the background.
+    fn spawn_highlight_task(&mut self) {
+        let body = self.response.body.clone();
+        let content_type = self.response.content_type.clone();
+        let view = self.response.view;
+        let tx = self.msg_tx.clone();
+        self.response.highlight_pending = true;
+        // spawn_blocking so syntect (CPU-bound) doesn't block the async executor.
+        tokio::task::spawn_blocking(move || {
+            let lines = highlight::render_body(&content_type, &body, view);
+            let _ = tx.send(AppMsg::HighlightResult(lines));
+        });
+    }
+
+    /// Apply a raw HTTP response.  Shows body as plain text immediately,
+    /// then fires a background task to produce highlighted lines.
+    pub fn apply_raw_result(&mut self, result: HttpResult) {
+        self.pending_request = false;
+        match result {
+            Ok(res) => {
+                // Show plain body instantly — zero highlighting cost on this path.
+                self.response.highlighted = highlight::plain_lines(&res.body);
+                self.response.status_code = Some(res.status_code);
+                self.response.latency_ms = Some(res.latency_ms);
+                self.response.size_bytes = res.size_bytes;
+                self.response.content_type = res.content_type;
+                self.response.body = res.body;
+                self.status_message = format!(
+                    "{} in {}ms  (highlighting…)",
+                    self.response.status_code.unwrap(),
+                    self.response.latency_ms.unwrap(),
+                );
+                // Now start the highlight task in the background.
+                self.spawn_highlight_task();
+            }
+            Err(e) => {
+                self.status_message = format!("Error: {e}");
+                self.response.highlighted =
+                    vec![Line::from(Span::styled(e, Style::default().fg(Color::Red)))];
+            }
+        }
+    }
+
+    /// Apply pre-computed highlighted lines when the background task finishes.
+    pub fn apply_highlight_result(&mut self, lines: Vec<Line<'static>>) {
+        self.response.highlighted = lines;
+        self.response.highlight_pending = false;
+        // Update status bar to remove the "(highlighting…)" suffix.
+        if let (Some(code), Some(ms)) = (self.response.status_code, self.response.latency_ms) {
+            self.status_message = format!("{} in {}ms", code, ms);
+        }
+    }
+
+    // -- Loader ------------------------------------------------------------
+
+    pub fn tick_loader(&mut self) {
+        if self.pending_request {
+            self.loader_tick = self.loader_tick.wrapping_add(1);
+        }
+    }
+
     // -- Mouse -------------------------------------------------------------
 
     pub fn handle_mouse_click(&mut self, col: u16, row: u16) {
         let area = self.last_area;
-        let explorer_width = (area.width as f32 * 0.25) as u16;
-        let editor_width = (area.width as f32 * 0.35) as u16;
-
-        if col < explorer_width {
+        let ew = (area.width as f32 * 0.25) as u16;
+        let ed = (area.width as f32 * 0.35) as u16;
+        if col < ew {
             self.focus = FocusPane::Explorer;
             if row >= 2 {
                 let idx = (row - 2) as usize;
@@ -510,20 +627,19 @@ impl App {
                     self.selected_route = idx;
                 }
             }
-        } else if col < explorer_width + editor_width {
+        } else if col < ew + ed {
             self.focus = FocusPane::Editor;
             if row >= 2 && row <= 4 {
                 self.start_editing(InputTarget::BaseUrl);
             } else if row == 5 || row == 6 {
-                let rel_x = col.saturating_sub(explorer_width);
-                let tab_w = editor_width.max(4) / 4;
-                let idx = (rel_x / tab_w).min(3) as usize;
+                let tab_w = ed.max(4) / 4;
+                let idx = ((col.saturating_sub(ew)) / tab_w).min(3) as usize;
                 self.editor_tab = EditorTab::ALL[idx];
             } else if row >= 9 {
-                let data_row = (row - 9) as usize;
-                let inner_x = col.saturating_sub(explorer_width + 1);
-                let key_end = 5 + (editor_width as f32 * 0.47) as u16;
-                if inner_x < 5 {
+                let dr = (row - 9) as usize;
+                let ix = col.saturating_sub(ew + 1);
+                let ke = 5 + (ed as f32 * 0.47) as u16;
+                if ix < 5 {
                     let tab = self.editor_tab;
                     let draft = self.current_draft_mut();
                     let rows = match tab {
@@ -532,14 +648,14 @@ impl App {
                         EditorTab::Auth => &mut draft.auth,
                         EditorTab::Body => return,
                     };
-                    if let Some(r) = rows.get_mut(data_row) {
+                    if let Some(r) = rows.get_mut(dr) {
                         r.enabled = !r.enabled;
                     }
                 } else {
                     self.start_editing(InputTarget::Tab(self.editor_tab));
                     let d = self.current_draft_mut();
-                    d.active_row = data_row;
-                    d.active_col = if inner_x < key_end { 0 } else { 1 };
+                    d.active_row = dr;
+                    d.active_col = if ix < ke { 0 } else { 1 };
                 }
             }
         } else {
@@ -557,12 +673,12 @@ impl App {
         let key = self
             .current_route()
             .map(|r| r.id())
-            .unwrap_or_else(|| "default".to_string());
+            .unwrap_or_else(|| "default".into());
         let base = self
             .url_history
             .last()
             .cloned()
-            .unwrap_or_else(|| "http://localhost:3000".to_string());
+            .unwrap_or_else(|| "http://localhost:3000".into());
         self.drafts
             .entry(key)
             .or_insert_with(|| RequestDraft::new(base))
@@ -572,20 +688,20 @@ impl App {
         let key = self
             .current_route()
             .map(|r| r.id())
-            .unwrap_or_else(|| "default".to_string());
+            .unwrap_or_else(|| "default".into());
         self.drafts.get(&key).cloned().unwrap_or_else(|| {
             RequestDraft::new(
                 self.url_history
                     .last()
                     .cloned()
-                    .unwrap_or_else(|| "http://localhost:3000".to_string()),
+                    .unwrap_or_else(|| "http://localhost:3000".into()),
             )
         })
     }
 
     pub fn active_buffer_mut(&mut self) -> &mut TextBuffer {
-        let target = self.input_target;
-        self.current_draft_mut().active_buffer_mut(target)
+        let t = self.input_target;
+        self.current_draft_mut().active_buffer_mut(t)
     }
 
     pub fn add_kv_row(&mut self) {
@@ -597,8 +713,6 @@ impl App {
         self.input_mode = true;
         self.input_target = InputTarget::Tab(tab);
     }
-
-    // -- Row navigation ----------------------------------------------------
 
     pub fn move_row(&mut self, up: bool) {
         let tab = self.editor_tab;
@@ -631,8 +745,6 @@ impl App {
         }
     }
 
-    // -- Focus -------------------------------------------------------------
-
     pub fn focus_next(&mut self) {
         self.focus = match self.focus {
             FocusPane::Explorer => FocusPane::Editor,
@@ -640,7 +752,6 @@ impl App {
             FocusPane::Viewer => FocusPane::Explorer,
         };
     }
-
     pub fn focus_prev(&mut self) {
         self.focus = match self.focus {
             FocusPane::Explorer => FocusPane::Viewer,
@@ -649,11 +760,10 @@ impl App {
         };
     }
 
-    // -- Editing -----------------------------------------------------------
-
     pub fn start_editing(&mut self, target: InputTarget) {
         self.input_mode = true;
         self.input_target = target;
+        self.body_type_focused = false;
         if target == InputTarget::BaseUrl {
             self.url_history_open = true;
             self.url_history_index = None;
@@ -662,6 +772,7 @@ impl App {
 
     pub fn stop_editing(&mut self) {
         self.input_mode = false;
+        self.body_type_focused = false;
         self.url_history_open = false;
         self.url_history_index = None;
         let url = self.current_draft().base_url.text.clone();
@@ -669,57 +780,6 @@ impl App {
             self.url_history.insert(0, url);
         }
     }
-
-    // -- HTTP --------------------------------------------------------------
-
-    pub async fn execute_current_request(&mut self) {
-        let Some(route) = self.current_route().cloned() else {
-            return;
-        };
-        self.pending_request = true;
-        self.loader_tick = 0;
-        self.viewer_scroll = 0;
-        let draft = self.current_draft();
-        let tx = self.request_tx.clone();
-        let client = self.http_client.clone();
-        tokio::spawn(async move {
-            let res = http::execute(client, route, draft).await;
-            // Highlighting is CPU work — do it here on a background thread
-            let res = res.map(|mut r| {
-                r.highlighted = highlight::render_body(&r.content_type, &r.body);
-                r
-            });
-            let _ = tx.send(res);
-        });
-    }
-
-    pub fn apply_http_result(&mut self, result: HttpResult) {
-        self.pending_request = false;
-        match result {
-            Ok(res) => {
-                self.response.status_code = Some(res.status_code);
-                self.response.latency_ms = Some(res.latency_ms);
-                self.response.size_bytes = res.size_bytes;
-                self.response.content_type = res.content_type;
-                self.response.body = res.body;
-                self.response.highlighted = res.highlighted;
-                self.status_message = format!("{} in {}ms", res.status_code, res.latency_ms);
-            }
-            Err(e) => {
-                self.status_message = format!("Error: {}", e);
-            }
-        }
-    }
-
-    // -- Loader ------------------------------------------------------------
-
-    pub fn tick_loader(&mut self) {
-        if self.pending_request {
-            self.loader_tick = self.loader_tick.wrapping_add(1);
-        }
-    }
-
-    // -- Custom route dialog -----------------------------------------------
 
     pub fn open_custom_route_dialog(&mut self) {
         self.custom_route_dialog = Some(CustomRouteDialog {
@@ -751,6 +811,9 @@ impl App {
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+use ratatui::style::{Color, Style};
+use ratatui::text::Span;
 
 pub fn human_bytes(size: usize) -> String {
     if size < 1024 {

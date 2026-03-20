@@ -1,6 +1,5 @@
 use crate::app::{BodyType, HttpMethod, RequestDraft};
 use crate::scanner::RouteInfo;
-use ratatui::text::Line;
 use reqwest::{
     Client, Method,
     header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
@@ -9,19 +8,19 @@ use std::time::Instant;
 
 pub type HttpResult = Result<HttpResponse, String>;
 
+/// Raw HTTP response — no highlighting, no post-processing.
+/// The UI thread applies highlighting lazily after this arrives.
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
     pub status_code: u16,
+    /// Wall-clock ms: request sent → last body byte received.
     pub latency_ms: u128,
     pub size_bytes: usize,
     pub content_type: String,
     pub body: String,
-    /// Syntax-highlighted lines — populated by the spawn task, not execute().
-    pub highlighted: Vec<Line<'static>>,
 }
 
 pub async fn execute(client: Client, route: RouteInfo, draft: RequestDraft) -> HttpResult {
-    // Build URL
     let base = draft.base_url.text.trim_end_matches('/');
     let path = route.path.trim_start_matches('/');
     let url = if path.is_empty() {
@@ -46,7 +45,6 @@ pub async fn execute(client: Client, route: RouteInfo, draft: RequestDraft) -> H
             headers.insert(n, v);
         }
     }
-    // Auth merged into headers
     for row in draft
         .auth
         .iter()
@@ -60,7 +58,6 @@ pub async fn execute(client: Client, route: RouteInfo, draft: RequestDraft) -> H
         }
     }
 
-    // Query params — zero-copy borrows
     let params: Vec<(&str, &str)> = draft
         .params
         .iter()
@@ -70,7 +67,6 @@ pub async fn execute(client: Client, route: RouteInfo, draft: RequestDraft) -> H
 
     req = req.headers(headers).query(&params);
 
-    // Body
     if !draft.body.text.is_empty() {
         match draft.body_type {
             BodyType::Json => {
@@ -92,10 +88,10 @@ pub async fn execute(client: Client, route: RouteInfo, draft: RequestDraft) -> H
         }
     }
 
-    // Timer covers only the network round-trip
+    // Timer: request sent → all bytes received.
     let start = Instant::now();
-    let res = req.send().await.map_err(|e| e.to_string())?;
 
+    let res = req.send().await.map_err(|e| e.to_string())?;
     let status_code = res.status().as_u16();
     let content_type = res
         .headers()
@@ -104,12 +100,10 @@ pub async fn execute(client: Client, route: RouteInfo, draft: RequestDraft) -> H
         .unwrap_or("text/plain")
         .to_string();
 
-    // bytes() skips charset-detection and latin-1 transcoding that text() does
+    // bytes() skips charset detection — faster than text()
     let bytes = res.bytes().await.map_err(|e| e.to_string())?;
     let latency_ms = start.elapsed().as_millis();
-
     let size_bytes = bytes.len();
-    // Single UTF-8 scan; lossless for valid UTF-8, replaces invalid sequences
     let body = String::from_utf8_lossy(&bytes).into_owned();
 
     Ok(HttpResponse {
@@ -118,7 +112,6 @@ pub async fn execute(client: Client, route: RouteInfo, draft: RequestDraft) -> H
         size_bytes,
         content_type,
         body,
-        highlighted: Vec::new(), // filled by the spawn task
     })
 }
 

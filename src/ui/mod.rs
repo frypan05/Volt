@@ -10,14 +10,37 @@ use ratatui::widgets::{
 };
 
 use crate::app::{App, BodyType, CustomRouteField, EditorTab, FocusPane, HttpMethod, InputTarget};
+use crate::ui::highlight::ResponseView;
+
+// Vesper palette — single source of truth for the whole UI
+const V_FG: Color = Color::Rgb(0xcc, 0xc9, 0xc2);
+const V_COMMENT: Color = Color::Rgb(0x4d, 0x4d, 0x4d);
+const V_ORANGE: Color = Color::Rgb(0xff, 0x98, 0x57);
+const V_YELLOW: Color = Color::Rgb(0xe5, 0xc0, 0x7b);
+const V_TEAL: Color = Color::Rgb(0x5c, 0xb8, 0xb2);
+const V_BLUE: Color = Color::Rgb(0x5b, 0xa2, 0xd0);
+const V_PINK: Color = Color::Rgb(0xd6, 0x7a, 0x9c);
+
+// ---------------------------------------------------------------------------
+// Top-level
+// ---------------------------------------------------------------------------
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     app.last_area = area;
-    // Advance the spinner every frame while a request is in-flight
     app.tick_loader();
 
-    let main_layout = Layout::default()
+    if area.width < 40 || area.height < 8 {
+        frame.render_widget(
+            Paragraph::new("Terminal too small — please resize")
+                .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                .alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
+
+    let main = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
@@ -26,32 +49,30 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .split(area);
 
-    draw_header(frame, app, main_layout[0]);
-    draw_footer(frame, app, main_layout[2]);
+    draw_header(frame, app, main[0]);
+    draw_footer(frame, app, main[2]);
 
-    let content_layout = Layout::default()
+    let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(25),
             Constraint::Percentage(35),
             Constraint::Percentage(40),
         ])
-        .split(main_layout[1]);
+        .split(main[1]);
 
-    draw_explorer(frame, app, content_layout[0]);
-    draw_editor(frame, app, content_layout[1]);
-    draw_viewer(frame, app, content_layout[2]);
+    draw_explorer(frame, app, cols[0]);
+    draw_editor(frame, app, cols[1]);
+    draw_viewer(frame, app, cols[2]);
 
-    // Overlays — drawn last so they sit on top of everything
     if app.url_history_open && app.url_history.len() > 1 {
-        draw_url_history_dropdown(frame, app, content_layout[1]);
+        draw_url_history_dropdown(frame, app, cols[1]);
     }
     if app.custom_route_dialog.is_some() {
         draw_custom_route_dialog(frame, app);
     }
-    // Loader overlay inside the response pane when waiting for a response
     if app.pending_request {
-        draw_loader(frame, app, content_layout[2]);
+        draw_loader(frame, app, cols[2]);
     }
 }
 
@@ -60,27 +81,36 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 // ---------------------------------------------------------------------------
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let hl_indicator = if app.response.highlight_pending {
+        Span::styled("  [hl…]", Style::default().fg(V_COMMENT))
+    } else {
+        Span::raw("")
+    };
     let text = Line::from(vec![
         Span::styled(
             " VOLT ",
             Style::default()
-                .bg(Color::Cyan)
+                .bg(V_ORANGE)
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
         Span::styled(
             format!("{} env vars", app.env_vars.len()),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(V_YELLOW),
         ),
+        hl_indicator,
     ]);
     frame.render_widget(Paragraph::new(text), area);
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let key = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
+    let key = Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD);
+    let extra = if app.body_type_focused {
+        Span::styled("  ←/→ body type  Esc back", Style::default().fg(V_YELLOW))
+    } else {
+        Span::raw("")
+    };
     let text = Line::from(vec![
         Span::styled(" q ", key),
         Span::raw("quit "),
@@ -91,23 +121,29 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" i ", key),
         Span::raw("edit "),
         Span::styled(" n ", key),
-        Span::raw("add row "),
+        Span::raw("row "),
         Span::styled(" r ", key),
         Span::raw("run "),
+        Span::styled(" [/] ", key),
+        Span::raw("view "),
         Span::raw(" | "),
         Span::raw(&app.status_message),
+        extra,
     ]);
     frame.render_widget(Paragraph::new(text).bg(Color::Indexed(234)), area);
 }
 
 // ---------------------------------------------------------------------------
-// Explorer pane
+// Explorer
 // ---------------------------------------------------------------------------
 
 fn draw_explorer(frame: &mut Frame, app: &App, area: Rect) {
     let block = pane_block(" 1. EXPLORER ", app.focus == FocusPane::Explorer);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
 
     let mut items: Vec<ListItem> = app
         .filtered_routes
@@ -127,7 +163,7 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect) {
     let sentinel_style = if app.selected_is_add_custom() {
         Style::default().fg(Color::Green)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(V_COMMENT)
     };
     items.push(ListItem::new(Span::styled(
         " + Add custom route",
@@ -141,60 +177,74 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 // ---------------------------------------------------------------------------
-// Editor pane
+// Editor
 // ---------------------------------------------------------------------------
 
 fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
     let block = pane_block(" 2. EDITOR ", app.focus == FocusPane::Editor);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if inner.height < 4 {
+        return;
+    }
+
+    let url_h = 3u16.min(inner.height.saturating_sub(2));
+    let tab_h = if inner.height > url_h { 2u16 } else { 0 };
+    let content_h = inner.height.saturating_sub(url_h + tab_h);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Base URL box
-            Constraint::Length(2), // Tab bar
-            Constraint::Min(0),    // Tab content
+            Constraint::Length(url_h),
+            Constraint::Length(tab_h),
+            Constraint::Min(content_h),
         ])
         .split(inner);
 
     draw_base_url(frame, app, chunks[0]);
-    draw_editor_tabs(frame, app, chunks[1]);
-
-    if app.editor_tab == EditorTab::Body {
-        draw_body_editor(frame, app, chunks[2]);
-    } else {
-        draw_kv_table(frame, app, chunks[2]);
+    if tab_h > 0 {
+        draw_editor_tabs(frame, app, chunks[1]);
+    }
+    if content_h > 0 {
+        if app.editor_tab == EditorTab::Body {
+            draw_body_editor(frame, app, chunks[2]);
+        } else {
+            draw_kv_table(frame, app, chunks[2]);
+        }
     }
 }
 
 fn draw_base_url(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
     let draft = app.current_draft();
-    let is_editing = app.input_mode && app.input_target == InputTarget::BaseUrl;
-
-    let url_block = Block::default()
+    let editing = app.input_mode && app.input_target == InputTarget::BaseUrl;
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(if is_editing {
-            " Base URL [Editing] (Up/Down: history, Esc: done) "
+        .title(if editing {
+            " Base URL [Editing] (↑/↓ history, Esc done) "
         } else {
             " Base URL [u] "
         })
-        .border_style(if is_editing {
-            Style::default().fg(Color::Yellow)
+        .border_style(if editing {
+            Style::default().fg(V_YELLOW)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(V_COMMENT)
         });
-
-    let url_content = if is_editing {
+    let content = if editing {
         cursor_line(&draft.base_url, " ")
     } else {
         Line::from(format!(" {}", draft.base_url.text))
     };
-    frame.render_widget(Paragraph::new(url_content).block(url_block), area);
+    frame.render_widget(Paragraph::new(content).block(block), area);
 }
 
 fn draw_editor_tabs(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
     let tabs = Tabs::new(
         EditorTab::ALL
             .iter()
@@ -207,20 +257,15 @@ fn draw_editor_tabs(frame: &mut Frame, app: &App, area: Rect) {
             .position(|t| *t == app.editor_tab)
             .unwrap_or(0),
     )
-    .highlight_style(
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )
+    .highlight_style(Style::default().fg(V_ORANGE).add_modifier(Modifier::BOLD))
     .divider("|");
     frame.render_widget(tabs, area);
 }
 
-// ---------------------------------------------------------------------------
-// KV table (Params / Headers / Auth)
-// ---------------------------------------------------------------------------
-
 fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
     let draft = app.current_draft();
     let tab = app.editor_tab;
     let rows = match tab {
@@ -229,25 +274,20 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
         EditorTab::Auth => &draft.auth,
         EditorTab::Body => return,
     };
-
-    // Reserve the last row for the "+ Add row" button
-    let table_height = area.height.saturating_sub(1);
-
-    // Column layout: checkbox | key | value
+    let tbl_h = area.height.saturating_sub(1);
     let constraints = [
         Constraint::Length(5),
         Constraint::Percentage(47),
         Constraint::Percentage(47),
     ];
 
-    // ---- Column header row ----
-    let header_area = Rect::new(area.x, area.y, area.width, 1);
-    let header_layout = Layout::default()
+    // Header row
+    let hdr = Rect::new(area.x, area.y, area.width, 1);
+    let hcols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(constraints)
-        .split(header_area);
-
-    frame.render_widget(Paragraph::new("").bg(Color::Indexed(236)), header_area);
+        .split(hdr);
+    frame.render_widget(Paragraph::new("").bg(Color::Indexed(236)), hdr);
     frame.render_widget(
         Paragraph::new(Span::styled(
             " name",
@@ -255,7 +295,7 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
                 .fg(Color::Indexed(245))
                 .add_modifier(Modifier::BOLD),
         )),
-        header_layout[1],
+        hcols[1],
     );
     frame.render_widget(
         Paragraph::new(Span::styled(
@@ -264,30 +304,27 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
                 .fg(Color::Indexed(245))
                 .add_modifier(Modifier::BOLD),
         )),
-        header_layout[2],
+        hcols[2],
     );
 
-    // ---- Separator ----
+    // Separator
     if area.height > 1 {
-        let sep_area = Rect::new(area.x, area.y + 1, area.width, 1);
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "─".repeat(area.width as usize),
                 Style::default().fg(Color::Indexed(238)),
             )),
-            sep_area,
+            Rect::new(area.x, area.y + 1, area.width, 1),
         );
     }
 
-    // ---- Data rows ----
+    // Data rows
     for (i, row) in rows.iter().enumerate() {
-        let row_y = area.y + 2 + (i as u16);
-        // Stop before the "+ Add row" button area
-        if row_y >= area.y + table_height {
+        let row_y = area.y + 2 + i as u16;
+        if row_y >= area.y + tbl_h {
             break;
         }
         let row_area = Rect::new(area.x, row_y, area.width, 1);
-
         let bg = if i % 2 == 0 {
             Color::Reset
         } else {
@@ -295,78 +332,58 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
         };
         frame.render_widget(Paragraph::new("").bg(bg), row_area);
 
-        let cell_layout = Layout::default()
+        let cells = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(constraints)
             .split(row_area);
-
-        let is_row_focused =
+        let focused =
             app.input_mode && app.input_target == InputTarget::Tab(tab) && draft.active_row == i;
 
-        // Checkbox
-        let checkbox_style = if row.enabled {
+        let cb = if row.enabled {
             Style::default().fg(Color::Green)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(V_COMMENT)
         };
         frame.render_widget(
-            Paragraph::new(Span::styled(
-                if row.enabled { " [x]" } else { " [ ]" },
-                checkbox_style,
-            )),
-            cell_layout[0],
+            Paragraph::new(Span::styled(if row.enabled { " [x]" } else { " [ ]" }, cb)),
+            cells[0],
         );
 
-        // Key cell
-        let key_focused = is_row_focused && draft.active_col == 0;
-        if key_focused {
+        if focused && draft.active_col == 0 {
             frame.render_widget(
                 Paragraph::new(cursor_line_styled(&row.key)).bg(Color::Indexed(236)),
-                cell_layout[1],
+                cells[1],
             );
         } else {
-            let (text, style) = if row.key.text.is_empty() {
-                (" key".to_string(), Style::default().fg(Color::Indexed(240)))
+            let (t, s) = if row.key.text.is_empty() {
+                (" key".into(), Style::default().fg(V_COMMENT))
             } else {
-                (
-                    format!(" {}", row.key.text),
-                    Style::default().fg(Color::White),
-                )
+                (format!(" {}", row.key.text), Style::default().fg(V_FG))
             };
-            frame.render_widget(Paragraph::new(Span::styled(text, style)), cell_layout[1]);
+            frame.render_widget(Paragraph::new(Span::styled(t, s)), cells[1]);
         }
-
-        // Value cell
-        let val_focused = is_row_focused && draft.active_col == 1;
-        if val_focused {
+        if focused && draft.active_col == 1 {
             frame.render_widget(
                 Paragraph::new(cursor_line_styled(&row.value)).bg(Color::Indexed(236)),
-                cell_layout[2],
+                cells[2],
             );
         } else {
-            let (text, style) = if row.value.text.is_empty() {
-                (
-                    " value".to_string(),
-                    Style::default().fg(Color::Indexed(240)),
-                )
+            let (t, s) = if row.value.text.is_empty() {
+                (" value".into(), Style::default().fg(V_COMMENT))
             } else {
-                (
-                    format!(" {}", row.value.text),
-                    Style::default().fg(Color::White),
-                )
+                (format!(" {}", row.value.text), Style::default().fg(V_FG))
             };
-            frame.render_widget(Paragraph::new(Span::styled(text, style)), cell_layout[2]);
+            frame.render_widget(Paragraph::new(Span::styled(t, s)), cells[2]);
         }
     }
 
-    // ---- "+ Add row" button pinned to the bottom of the table area ----
+    // Add-row button
     let btn_y = area.y + area.height - 1;
-    let btn_area = Rect::new(area.x, btn_y, area.width, 1);
     let btn_label = match tab {
         EditorTab::Headers => " + Add header",
         EditorTab::Params => " + Add param",
         EditorTab::Auth => " + Add auth entry",
-        EditorTab::Body => "",
+        _ => "",
     };
     frame.render_widget(
         Paragraph::new(Span::styled(
@@ -376,57 +393,64 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ))
         .bg(Color::Indexed(235)),
-        btn_area,
+        Rect::new(area.x, btn_y, area.width, 1),
     );
 }
 
-// ---------------------------------------------------------------------------
-// Body editor
-// ---------------------------------------------------------------------------
-
 fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
     let draft = app.current_draft();
-    let is_editing = app.input_mode && app.input_target == InputTarget::Tab(EditorTab::Body);
-
+    let editing = app.input_mode && app.input_target == InputTarget::Tab(EditorTab::Body);
+    let sel_h = if area.height > 1 { 1u16 } else { 0 };
+    let body_h = area.height.saturating_sub(sel_h);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([Constraint::Length(sel_h), Constraint::Min(body_h)])
         .split(area);
 
-    draw_body_type_selector(frame, app, chunks[0]);
+    if sel_h > 0 {
+        draw_body_type_selector(frame, app, chunks[0]);
+    }
+    if body_h == 0 {
+        return;
+    }
 
+    let bc = if editing {
+        V_YELLOW
+    } else if app.body_type_focused {
+        V_TEAL
+    } else {
+        V_COMMENT
+    };
     let block = Block::default()
-        .title(if is_editing {
+        .title(if editing {
             " Body [Editing] "
         } else {
             " Body [i] "
         })
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(if is_editing {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        });
+        .border_style(Style::default().fg(bc));
 
     if draft.body_type == BodyType::None {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                " Select a body type with ←/→, then press i to edit",
-                Style::default().fg(Color::Indexed(240)),
+                " Select a body type with ←/→, then i to edit",
+                Style::default().fg(V_COMMENT),
             ))
             .block(block),
             chunks[1],
         );
         return;
     }
-
-    let content = if is_editing {
+    let content = if editing {
         render_multiline_with_cursor(&draft.body)
     } else if draft.body.text.is_empty() {
         vec![Line::from(Span::styled(
             " i: start editing",
-            Style::default().fg(Color::Indexed(240)),
+            Style::default().fg(V_COMMENT),
         ))]
     } else {
         draft
@@ -436,7 +460,6 @@ fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect) {
             .map(|l| Line::from(l.to_string()))
             .collect()
     };
-
     frame.render_widget(
         Paragraph::new(content)
             .block(block)
@@ -447,54 +470,67 @@ fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect) {
     let draft = app.current_draft();
-    let mut spans = vec![Span::raw(" Type: ")];
+    let mut spans: Vec<Span> = vec![Span::styled(" Type: ", Style::default().fg(V_COMMENT))];
     for btype in &BodyType::ALL {
-        let selected = draft.body_type == *btype;
-        let style = if selected {
+        let sel = draft.body_type == *btype;
+        let style = if sel {
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Cyan)
+                .bg(V_ORANGE)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Indexed(245))
+            Style::default().fg(V_COMMENT)
         };
         spans.push(Span::styled(format!(" {} ", btype.label()), style));
         spans.push(Span::raw(" "));
     }
-    // Hint: arrow keys only (no h/l)
-    spans.push(Span::styled(
-        "  ←/→ change",
-        Style::default().fg(Color::Indexed(238)),
-    ));
+    if app.body_type_focused {
+        spans.push(Span::styled(
+            "  ←/→ change  Esc back",
+            Style::default().fg(V_YELLOW),
+        ));
+    } else {
+        spans.push(Span::styled("  ←/→", Style::default().fg(V_COMMENT)));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ---------------------------------------------------------------------------
-// Response / Viewer pane
+// Viewer / Response
 // ---------------------------------------------------------------------------
 
 fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
     let block = pane_block(" 3. RESPONSE ", app.focus == FocusPane::Viewer);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if inner.height < 3 {
+        return;
+    }
+
+    let metrics_h = 5u16.min(inner.height.saturating_sub(2));
+    let view_sel_h = if inner.height > metrics_h { 1u16 } else { 0 };
+    let body_h = inner.height.saturating_sub(metrics_h + view_sel_h);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(metrics_h),
+            Constraint::Length(view_sel_h),
+            Constraint::Min(body_h),
+        ])
         .split(inner);
 
-    // ---- Metrics header ----
     let res = &app.response;
     let status_color = match res.status_code {
         Some(c) if c < 300 => Color::Green,
-        Some(c) if c < 400 => Color::Yellow,
+        Some(c) if c < 400 => V_YELLOW,
         Some(_) => Color::Red,
-        None => Color::DarkGray,
+        None => V_COMMENT,
     };
 
     let metrics = vec![
         Line::from(vec![
-            Span::raw(" Status: "),
+            Span::styled(" Status: ", Style::default().fg(V_COMMENT)),
             Span::styled(
                 res.status_code.map(|c| c.to_string()).unwrap_or("-".into()),
                 Style::default()
@@ -503,46 +539,57 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
             ),
         ]),
         Line::from(vec![
-            Span::raw(" Time:   "),
-            Span::raw(
+            Span::styled(" Time:   ", Style::default().fg(V_COMMENT)),
+            Span::styled(
                 res.latency_ms
                     .map(|l| format!("{}ms", l))
                     .unwrap_or("-".into()),
+                Style::default().fg(V_FG),
             ),
         ]),
         Line::from(vec![
-            Span::raw(" Size:   "),
-            Span::raw(crate::app::human_bytes(res.size_bytes)),
+            Span::styled(" Size:   ", Style::default().fg(V_COMMENT)),
+            Span::styled(
+                crate::app::human_bytes(res.size_bytes),
+                Style::default().fg(V_FG),
+            ),
         ]),
-        Line::from(vec![Span::raw(" Type:   "), Span::raw(&res.content_type)]),
+        Line::from(vec![
+            Span::styled(" Type:   ", Style::default().fg(V_COMMENT)),
+            Span::styled(res.content_type.clone(), Style::default().fg(V_BLUE)),
+        ]),
     ];
     frame.render_widget(
         Paragraph::new(metrics).block(Block::default().borders(Borders::BOTTOM)),
         chunks[0],
     );
 
-    // ---- Scrollable body ----
-    let body_area = chunks[1];
+    if view_sel_h > 0 {
+        draw_response_view_selector(frame, app, chunks[1]);
+    }
+
+    if body_h == 0 {
+        return;
+    }
+    let body_area = chunks[2];
 
     if res.highlighted.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                " No response — press r to send request",
-                Style::default().fg(Color::DarkGray),
+                " No response — press r to send",
+                Style::default().fg(V_COMMENT),
             )),
             body_area,
         );
         return;
     }
 
-    let total_lines = res.highlighted.len() as u16;
-    let visible_lines = body_area.height;
-    // Clamp scroll so we never scroll past the last line
-    let max_scroll = total_lines.saturating_sub(visible_lines);
-    let scroll = app.viewer_scroll.min(max_scroll);
+    let total = res.highlighted.len() as u16;
+    let visible = body_area.height;
+    let max_sc = total.saturating_sub(visible);
+    let scroll = app.viewer_scroll.min(max_sc);
 
-    // Body paragraph with scroll offset
-    // Reserve 1 column on the right for the scrollbar
+    // Render paragraph in a slightly narrower area to leave room for scrollbar
     let para_area = Rect {
         width: body_area.width.saturating_sub(1),
         ..body_area
@@ -554,21 +601,19 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
         para_area,
     );
 
-    // Vertical scrollbar
-    if total_lines > visible_lines {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+    if total > visible {
+        let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"))
             .track_symbol(Some("│"))
             .thumb_symbol("█");
-        let mut scrollbar_state =
-            ScrollbarState::new(max_scroll as usize).position(scroll as usize);
-        frame.render_stateful_widget(scrollbar, body_area, &mut scrollbar_state);
+        let mut ss = ScrollbarState::new(max_sc as usize).position(scroll as usize);
+        frame.render_stateful_widget(sb, body_area, &mut ss);
     }
 
-    // Scroll hint (only when focused and there is content to scroll)
-    if app.focus == FocusPane::Viewer && total_lines > visible_lines {
-        let hint_area = Rect::new(
+    // Scroll hint at the bottom of the body area
+    if app.focus == FocusPane::Viewer && total > visible {
+        let hint = Rect::new(
             body_area.x,
             body_area.y + body_area.height - 1,
             body_area.width,
@@ -576,12 +621,31 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
         );
         frame.render_widget(
             Paragraph::new(Span::styled(
-                " j/k or ↑/↓ scroll  PgUp/PgDn skip",
-                Style::default().fg(Color::Indexed(238)),
+                " j/k scroll  PgUp/Dn  [/] view",
+                Style::default().fg(V_COMMENT),
             )),
-            hint_area,
+            hint,
         );
     }
+}
+
+fn draw_response_view_selector(frame: &mut Frame, app: &App, area: Rect) {
+    let mut spans: Vec<Span> = vec![Span::styled(" View: ", Style::default().fg(V_COMMENT))];
+    for v in &ResponseView::ALL {
+        let sel = app.response.view == *v;
+        let style = if sel {
+            Style::default()
+                .fg(Color::Black)
+                .bg(V_TEAL)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(V_COMMENT)
+        };
+        spans.push(Span::styled(format!(" {} ", v.label()), style));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled("[/]", Style::default().fg(V_COMMENT)));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ---------------------------------------------------------------------------
@@ -589,35 +653,30 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
 // ---------------------------------------------------------------------------
 
 fn draw_loader(frame: &mut Frame, app: &App, viewer_area: Rect) {
-    // Spinner frames — simple braille rotation
     const FRAMES: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
-    let frame_idx = (app.loader_tick as usize / 3) % FRAMES.len();
-    let spinner = FRAMES[frame_idx];
-
-    // Small centred overlay — 3 rows tall, 28 cols wide
+    let spinner = FRAMES[(app.loader_tick as usize / 2) % FRAMES.len()];
     let w: u16 = 30;
     let h: u16 = 3;
+    if viewer_area.width < w || viewer_area.height < h {
+        return;
+    }
     let x = viewer_area.x + (viewer_area.width.saturating_sub(w)) / 2;
     let y = viewer_area.y + (viewer_area.height.saturating_sub(h)) / 2;
     let overlay = Rect::new(x, y, w, h);
-
     frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(V_TEAL));
     let inner = block.inner(overlay);
     frame.render_widget(block, overlay);
-
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 format!(" {} ", spinner),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Waiting for response…", Style::default().fg(Color::White)),
+            Span::styled("Waiting for response…", Style::default().fg(V_FG)),
         ]))
         .alignment(Alignment::Left),
         inner,
@@ -625,51 +684,47 @@ fn draw_loader(frame: &mut Frame, app: &App, viewer_area: Rect) {
 }
 
 // ---------------------------------------------------------------------------
-// URL history dropdown overlay
+// URL history dropdown
 // ---------------------------------------------------------------------------
 
 fn draw_url_history_dropdown(frame: &mut Frame, app: &App, editor_area: Rect) {
-    let dropdown_y = editor_area.y + 4;
-    let max_visible = 6usize;
-    let visible = app.url_history.len().min(max_visible);
-    if dropdown_y + visible as u16 + 2 > frame.area().height {
+    let dy = editor_area.y + 4;
+    let max = 6usize;
+    let vis = app.url_history.len().min(max);
+    if dy + vis as u16 + 2 > frame.area().height || editor_area.width < 4 {
         return;
     }
-
-    let dropdown_area = Rect::new(
+    let area = Rect::new(
         editor_area.x + 1,
-        dropdown_y,
+        dy,
         editor_area.width.saturating_sub(2),
-        visible as u16 + 2,
+        vis as u16 + 2,
     );
-
-    frame.render_widget(Clear, dropdown_area);
+    frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
+        .border_style(Style::default().fg(V_YELLOW))
         .title(" URL History (↑/↓) ");
-    let inner = block.inner(dropdown_area);
-    frame.render_widget(block, dropdown_area);
-
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     let items: Vec<ListItem> = app
         .url_history
         .iter()
-        .take(max_visible)
+        .take(max)
         .enumerate()
         .map(|(i, url)| {
-            let selected = app.url_history_index == Some(i);
-            let style = if selected {
+            let sel = app.url_history_index == Some(i);
+            let style = if sel {
                 Style::default()
-                    .bg(Color::Cyan)
+                    .bg(V_TEAL)
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(V_FG)
             };
             ListItem::new(Span::styled(format!(" {}", url), style))
         })
         .collect();
-
     frame.render_widget(List::new(items), inner);
 }
 
@@ -681,172 +736,178 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App) {
     let Some(d) = &app.custom_route_dialog else {
         return;
     };
-
-    let area = centered_rect(70, 50, frame.area());
+    let fa = frame.area();
+    let px = if fa.width < 60 { 95u16 } else { 70 };
+    let py = if fa.height < 20 { 90u16 } else { 50 };
+    let area = centered_rect(px, py, fa);
     frame.render_widget(Clear, area);
 
-    let outer_block = Block::default()
+    let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .title(" Add Custom Route ")
-        .border_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
-    let inner = outer_block.inner(area);
-    frame.render_widget(outer_block, area);
+        .border_style(Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+    if inner.height < 4 {
+        return;
+    }
+
+    let av = inner.height;
+    let ml = if av >= 2 { 1u16 } else { 0 };
+    let mp = if av >= ml + 3 { 3u16 } else { 0 };
+    let g1 = if av > ml + mp { 1u16 } else { 0 };
+    let pl = if av > ml + mp + g1 { 1u16 } else { 0 };
+    let pi = if av > ml + mp + g1 + pl { 3u16 } else { 0 };
+    let ht = av.saturating_sub(ml + mp + g1 + pl + pi);
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // top padding
-            Constraint::Length(1), // method label
-            Constraint::Length(3), // method pills
-            Constraint::Length(1), // gap
-            Constraint::Length(1), // path label
-            Constraint::Length(3), // path input
-            Constraint::Length(1), // gap
-            Constraint::Min(1),    // hints
+            Constraint::Length(ml),
+            Constraint::Length(mp),
+            Constraint::Length(g1),
+            Constraint::Length(pl),
+            Constraint::Length(pi),
+            Constraint::Min(ht),
         ])
         .split(inner);
 
-    // ---- Method label ----
-    let method_focused = d.active_field == CustomRouteField::Method;
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            " Method  (← / → to select, Tab to move to Path)",
-            if method_focused {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Indexed(245))
-            },
-        )),
-        rows[1],
-    );
+    let mf = d.active_field == CustomRouteField::Method;
+    let pf = d.active_field == CustomRouteField::Path;
 
-    // ---- Method pills ----
-    let method_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(if method_focused {
-            BorderType::Rounded
-        } else {
-            BorderType::Plain
-        })
-        .border_style(if method_focused {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::Indexed(238))
-        });
-    let pill_inner = method_block.inner(rows[2]);
-    frame.render_widget(method_block, rows[2]);
-
-    let method_count = HttpMethod::ALL.len() as u32;
-    let pill_constraints: Vec<Constraint> = (0..method_count)
-        .map(|_| Constraint::Ratio(1, method_count))
-        .collect();
-    let pill_cells = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(pill_constraints)
-        .split(pill_inner);
-
-    for (i, m) in HttpMethod::ALL.iter().enumerate() {
-        let is_selected = *m == d.method;
-        let (bg, fg, modifier) = if is_selected {
-            (method_pill_color(m.as_str()), Color::Black, Modifier::BOLD)
-        } else {
-            (Color::Indexed(236), Color::Indexed(245), Modifier::empty())
-        };
+    if ml > 0 {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                format!(" {} ", m.as_str()),
-                Style::default().fg(fg).add_modifier(modifier),
-            ))
-            .bg(bg)
-            .alignment(Alignment::Center),
-            pill_cells[i],
+                " Method  (← / → to select, Tab to move to Path)",
+                if mf {
+                    Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(V_COMMENT)
+                },
+            )),
+            rows[0],
         );
     }
 
-    // ---- Path label ----
-    let path_focused = d.active_field == CustomRouteField::Path;
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            " Path  (type route path, Enter to confirm)",
-            if path_focused {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
+    if mp > 0 {
+        let mb = Block::default()
+            .borders(Borders::ALL)
+            .border_type(if mf {
+                BorderType::Rounded
             } else {
-                Style::default().fg(Color::Indexed(245))
-            },
-        )),
-        rows[4],
-    );
+                BorderType::Plain
+            })
+            .border_style(if mf {
+                Style::default().fg(V_TEAL)
+            } else {
+                Style::default().fg(Color::Indexed(238))
+            });
+        let pi_inner = mb.inner(rows[1]);
+        frame.render_widget(mb, rows[1]);
+        let mc = HttpMethod::ALL.len() as u32;
+        let pc = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(
+                (0..mc)
+                    .map(|_| Constraint::Ratio(1, mc))
+                    .collect::<Vec<_>>(),
+            )
+            .split(pi_inner);
+        for (i, m) in HttpMethod::ALL.iter().enumerate() {
+            let is_sel = *m == d.method;
+            let (bg, fg, mo) = if is_sel {
+                (method_pill_color(m.as_str()), Color::Black, Modifier::BOLD)
+            } else {
+                (Color::Indexed(236), V_COMMENT, Modifier::empty())
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {} ", m.as_str()),
+                    Style::default().fg(fg).add_modifier(mo),
+                ))
+                .bg(bg)
+                .alignment(Alignment::Center),
+                pc[i],
+            );
+        }
+    }
 
-    // ---- Path input ----
-    let path_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(if path_focused {
-            BorderType::Rounded
-        } else {
-            BorderType::Plain
-        })
-        .border_style(if path_focused {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::Indexed(238))
-        });
-    let path_content = if path_focused {
-        cursor_line(&d.path, " ")
-    } else {
-        Line::from(format!(" {}", d.path.text))
-    };
-    frame.render_widget(Paragraph::new(path_content).block(path_block), rows[5]);
+    if pl > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " Path  (type route path, Enter to confirm)",
+                if pf {
+                    Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(V_COMMENT)
+                },
+            )),
+            rows[3],
+        );
+    }
 
-    // ---- Hints ----
-    let key = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(" ←/→ ", key),
-            Span::raw("method  "),
-            Span::styled(" Tab ", key),
-            Span::raw("next field  "),
-            Span::styled(" Enter ", key),
-            Span::raw("confirm  "),
-            Span::styled(" Esc ", key),
-            Span::raw("cancel"),
-        ])),
-        rows[7],
-    );
+    if pi > 0 {
+        let pb = Block::default()
+            .borders(Borders::ALL)
+            .border_type(if pf {
+                BorderType::Rounded
+            } else {
+                BorderType::Plain
+            })
+            .border_style(if pf {
+                Style::default().fg(V_YELLOW)
+            } else {
+                Style::default().fg(Color::Indexed(238))
+            });
+        let pc = if pf {
+            cursor_line(&d.path, " ")
+        } else {
+            Line::from(format!(" {}", d.path.text))
+        };
+        frame.render_widget(Paragraph::new(pc).block(pb), rows[4]);
+    }
+
+    if ht > 0 {
+        let key = Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(" ←/→ ", key),
+                Span::raw("method  "),
+                Span::styled(" Tab ", key),
+                Span::raw("next  "),
+                Span::styled(" Enter ", key),
+                Span::raw("confirm  "),
+                Span::styled(" Esc ", key),
+                Span::raw("cancel"),
+            ])),
+            rows[5],
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Shared helpers
 // ---------------------------------------------------------------------------
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
+fn centered_rect(px: u16, py: u16, r: Rect) -> Rect {
+    let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage((100 - py) / 2),
+            Constraint::Percentage(py),
+            Constraint::Percentage((100 - py) / 2),
         ])
         .split(r);
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage((100 - px) / 2),
+            Constraint::Percentage(px),
+            Constraint::Percentage((100 - px) / 2),
         ])
-        .split(popup_layout[1])[1]
+        .split(v[1])[1]
 }
 
 fn cursor_line<'a>(buf: &crate::app::TextBuffer, prefix: &str) -> Line<'a> {
@@ -864,7 +925,6 @@ fn cursor_line<'a>(buf: &crate::app::TextBuffer, prefix: &str) -> Line<'a> {
     ])
 }
 
-/// Cursor-highlighted line for KV cell editing (with leading space).
 fn cursor_line_styled<'a>(buf: &crate::app::TextBuffer) -> Line<'a> {
     let (before, at, after) = buf.split_at_cursor();
     Line::from(vec![
@@ -881,15 +941,15 @@ fn cursor_line_styled<'a>(buf: &crate::app::TextBuffer) -> Line<'a> {
 }
 
 fn render_multiline_with_cursor(buf: &crate::app::TextBuffer) -> Vec<Line<'static>> {
-    let text_before = &buf.text[..buf.cursor.min(buf.text.len())];
-    let cursor_line_idx = text_before.chars().filter(|c| *c == '\n').count();
+    let tb = &buf.text[..buf.cursor.min(buf.text.len())];
+    let ci = tb.chars().filter(|c| *c == '\n').count();
     buf.text
         .lines()
         .enumerate()
         .map(|(i, line)| {
-            if i == cursor_line_idx {
-                let line_start: usize = buf.text.lines().take(i).map(|l| l.len() + 1).sum();
-                let col = buf.cursor.saturating_sub(line_start).min(line.len());
+            if i == ci {
+                let ls: usize = buf.text.lines().take(i).map(|l| l.len() + 1).sum();
+                let col = buf.cursor.saturating_sub(ls).min(line.len());
                 let (before, at, after) = if col >= line.len() {
                     (line, " ", "")
                 } else {
@@ -919,19 +979,14 @@ fn render_multiline_with_cursor(buf: &crate::app::TextBuffer) -> Vec<Line<'stati
 }
 
 fn pane_block(title: &str, focused: bool) -> Block {
-    let color = if focused {
-        Color::Cyan
+    let (color, bt) = if focused {
+        (V_TEAL, BorderType::Thick)
     } else {
-        Color::DarkGray
-    };
-    let border_type = if focused {
-        BorderType::Thick
-    } else {
-        BorderType::Plain
+        (V_COMMENT, BorderType::Plain)
     };
     Block::default()
         .borders(Borders::ALL)
-        .border_type(border_type)
+        .border_type(bt)
         .border_style(Style::default().fg(color))
         .title(Span::styled(
             title,
@@ -942,23 +997,23 @@ fn pane_block(title: &str, focused: bool) -> Block {
 fn method_color(m: &str) -> Color {
     match m {
         "GET" => Color::Green,
-        "POST" => Color::Blue,
-        "PUT" => Color::Yellow,
-        "PATCH" => Color::Magenta,
+        "POST" => V_BLUE,
+        "PUT" => V_YELLOW,
+        "PATCH" => V_PINK,
         "DELETE" => Color::Red,
-        _ => Color::Cyan,
+        _ => V_TEAL,
     }
 }
 
 fn method_pill_color(m: &str) -> Color {
     match m {
         "GET" => Color::Green,
-        "POST" => Color::Blue,
-        "PUT" => Color::Yellow,
-        "PATCH" => Color::Magenta,
+        "POST" => V_BLUE,
+        "PUT" => V_YELLOW,
+        "PATCH" => V_PINK,
         "DELETE" => Color::Red,
-        "OPTIONS" => Color::Cyan,
+        "OPTIONS" => V_TEAL,
         "HEAD" => Color::Indexed(208),
-        _ => Color::Cyan,
+        _ => V_TEAL,
     }
 }
