@@ -65,6 +65,15 @@ async fn main() -> anyhow::Result<()> {
                 {
                     app.handle_mouse_click(m.column, m.row);
                 }
+                Event::Mouse(m) if m.kind == MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                    app.resize_panes(m.column);
+                }
+                Event::Mouse(m) if m.kind == MouseEventKind::ScrollUp => {
+                    app.handle_mouse_scroll(m.column, m.row, true);
+                }
+                Event::Mouse(m) if m.kind == MouseEventKind::ScrollDown => {
+                    app.handle_mouse_scroll(m.column, m.row, false);
+                }
                 _ => {}
             }
         }
@@ -100,10 +109,10 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('4') => app.select_view(ResponseView::Text),
             KeyCode::Char('5') => app.select_view(ResponseView::Raw),
             // j/k or arrow keys move selection, Enter confirms
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Char('k') | KeyCode::Down => {
                 app.response.view = app.response.view.next();
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Char('j') | KeyCode::Up => {
                 app.response.view = app.response.view.prev();
             }
             KeyCode::Enter => {
@@ -282,18 +291,18 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::BackTab => app.focus_prev(),
 
         // Explorer
-        KeyCode::Char('j') | KeyCode::Down if app.focus == FocusPane::Explorer => {
-            app.selected_route = (app.selected_route + 1).min(app.filtered_routes.len());
+        KeyCode::Char('k') | KeyCode::Down if app.focus == FocusPane::Explorer => {
+            app.move_explorer_selection(true);
         }
-        KeyCode::Char('k') | KeyCode::Up if app.focus == FocusPane::Explorer => {
-            app.selected_route = app.selected_route.saturating_sub(1);
+        KeyCode::Char('j') | KeyCode::Up if app.focus == FocusPane::Explorer => {
+            app.move_explorer_selection(false);
         }
 
         // Viewer scroll
-        KeyCode::Char('j') | KeyCode::Down if app.focus == FocusPane::Viewer => {
+        KeyCode::Char('k') | KeyCode::Down if app.focus == FocusPane::Viewer => {
             app.scroll_viewer(false)
         }
-        KeyCode::Char('k') | KeyCode::Up if app.focus == FocusPane::Viewer => {
+        KeyCode::Char('j') | KeyCode::Up if app.focus == FocusPane::Viewer => {
             app.scroll_viewer(true)
         }
         KeyCode::PageDown if app.focus == FocusPane::Viewer => app.scroll_viewer_page(false),

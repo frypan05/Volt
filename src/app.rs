@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
@@ -11,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
-use crate::http::{self, HttpResponse, HttpResult};
+use crate::http::{self, HttpResult};
 use crate::scanner::{RouteInfo, ScannerReport};
 use crate::ui::highlight::{self, ResponseView};
 
@@ -198,10 +196,6 @@ impl TextBuffer {
     pub fn move_end(&mut self) {
         self.cursor = self.text.len();
     }
-    pub fn clear(&mut self) {
-        self.text.clear();
-        self.cursor = 0;
-    }
     pub fn split_at_cursor(&self) -> (&str, &str, &str) {
         if self.cursor >= self.text.len() {
             return (&self.text, " ", "");
@@ -366,12 +360,13 @@ pub struct ResponseState {
 pub struct App {
     pub routes: Vec<RouteInfo>,
     pub filtered_routes: Vec<RouteInfo>,
-    pub scanner_report: ScannerReport,
     pub selected_route: usize,
     pub focus: FocusPane,
     pub editor_tab: EditorTab,
     pub input_mode: bool,
     pub input_target: InputTarget,
+
+    pub pane_widths: [u16; 3],
 
     /// True when the user is in the body-type selector row (←/→ changes type).
     /// Esc from here returns to the Auth tab (one tab to the left of Body).
@@ -439,12 +434,12 @@ impl App {
         Self {
             routes: routes.clone(),
             filtered_routes: routes,
-            scanner_report: report,
             selected_route: 0,
             focus: FocusPane::Explorer,
             editor_tab: EditorTab::Params,
             input_mode: false,
             input_target: InputTarget::Tab(EditorTab::Params),
+            pane_widths: [25, 35, 40],
             body_type_focused: false,
             view_picker_open: false,
             drafts: HashMap::new(),
@@ -624,9 +619,14 @@ impl App {
 
     pub fn handle_mouse_click(&mut self, col: u16, row: u16) {
         let area = self.last_area;
-        let ew = (area.width as f32 * 0.25) as u16;
-        let ed = (area.width as f32 * 0.35) as u16;
-        if col < ew {
+        if area.width < 10 {
+            return;
+        }
+
+        let w0 = (area.width as f32 * (self.pane_widths[0] as f32 / 100.0)) as u16;
+        let w1 = (area.width as f32 * (self.pane_widths[1] as f32 / 100.0)) as u16;
+
+        if col < w0 {
             self.focus = FocusPane::Explorer;
             if row >= 2 {
                 let idx = (row - 2) as usize;
@@ -634,39 +634,87 @@ impl App {
                     self.selected_route = idx;
                 }
             }
-        } else if col < ew + ed {
+        } else if col < w0 + w1 {
             self.focus = FocusPane::Editor;
-            if row >= 2 && row <= 4 {
+            // Editor pane hit testing
+            let inner_x = col.saturating_sub(w0);
+            // URL area: title is 1 row, block is 3 rows.
+            // draw_editor uses chunks: url_h (3), tab_h (2), content_h (Min)
+            // inner_y in editor block starts at row 1 (since main[0] is header).
+            // Actually area is main[1], so row starts at 1.
+            let editor_y = row.saturating_sub(1); // 0-based within main[1]
+            if editor_y >= 1 && editor_y <= 3 {
+                // Base URL block
                 self.start_editing(InputTarget::BaseUrl);
-            } else if row == 5 || row == 6 {
-                let tab_w = ed.max(4) / 4;
-                let idx = ((col.saturating_sub(ew)) / tab_w).min(3) as usize;
-                self.editor_tab = EditorTab::ALL[idx];
-            } else if row >= 9 {
-                let dr = (row - 9) as usize;
-                let ix = col.saturating_sub(ew + 1);
-                let ke = 5 + (ed as f32 * 0.47) as u16;
-                if ix < 5 {
-                    let tab = self.editor_tab;
-                    let draft = self.current_draft_mut();
-                    let rows = match tab {
-                        EditorTab::Headers => &mut draft.headers,
-                        EditorTab::Params => &mut draft.params,
-                        EditorTab::Auth => &mut draft.auth,
-                        EditorTab::Body => return,
-                    };
-                    if let Some(r) = rows.get_mut(dr) {
-                        r.enabled = !r.enabled;
-                    }
+            } else if editor_y == 4 || editor_y == 5 {
+                // Tabs area hit testing.
+                // Titles: "Params" (6), "Headers" (7), "Auth" (4), "Body" (4)
+                // Divider: "|" (1)
+                // Tabs widget starts at x=1 within the editor pane due to border.
+                let x = inner_x.saturating_sub(1);
+                if x <= 6 {
+                    self.editor_tab = EditorTab::Params;
+                } else if x <= 14 {
+                    self.editor_tab = EditorTab::Headers;
+                } else if x <= 19 {
+                    self.editor_tab = EditorTab::Auth;
                 } else {
-                    self.start_editing(InputTarget::Tab(self.editor_tab));
-                    let d = self.current_draft_mut();
-                    d.active_row = dr;
-                    d.active_col = if ix < ke { 0 } else { 1 };
+                    self.editor_tab = EditorTab::Body;
+                }
+            } else if editor_y >= 6 {
+                // Content area (KV table or Body)
+                if self.editor_tab == EditorTab::Body {
+                    // Simple hit to focus body
+                    self.start_editing(InputTarget::Tab(EditorTab::Body));
+                } else {
+                    // KV Table
+                    // Headers/Table start at editor_y 6.
+                    // Header row is 1, spacer is 1. Rows start at 8.
+                    if editor_y >= 8 {
+                        let dr = (editor_y - 8) as usize;
+                        let ix = inner_x.saturating_sub(1);
+                        let ke = 5 + (w1 as f32 * 0.47) as u16;
+                        if ix < 5 {
+                            let tab = self.editor_tab;
+                            let draft = self.current_draft_mut();
+                            let rows = match tab {
+                                EditorTab::Headers => &mut draft.headers,
+                                EditorTab::Params => &mut draft.params,
+                                EditorTab::Auth => &mut draft.auth,
+                                EditorTab::Body => return,
+                            };
+                            if let Some(r) = rows.get_mut(dr) {
+                                r.enabled = !r.enabled;
+                            }
+                        } else {
+                            self.start_editing(InputTarget::Tab(self.editor_tab));
+                            let d = self.current_draft_mut();
+                            d.active_row = dr;
+                            d.active_col = if ix < ke { 0 } else { 1 };
+                        }
+                    }
                 }
             }
         } else {
             self.focus = FocusPane::Viewer;
+        }
+    }
+
+    pub fn handle_mouse_scroll(&mut self, col: u16, _row: u16, up: bool) {
+        let area = self.last_area;
+        if area.width < 10 {
+            return;
+        }
+
+        let w0 = (area.width as f32 * (self.pane_widths[0] as f32 / 100.0)) as u16;
+        let w01 = (area.width as f32 * ((self.pane_widths[0] + self.pane_widths[1]) as f32 / 100.0)) as u16;
+
+        if col < w0 {
+            // Explorer pane
+            self.move_explorer_selection(!up);
+        } else if col >= w01 {
+            // Viewer pane
+            self.scroll_viewer(up);
         }
     }
 
@@ -767,6 +815,23 @@ impl App {
         };
     }
 
+    pub fn move_explorer_selection(&mut self, down: bool) {
+        let max = self.filtered_routes.len(); // includes "+ Add custom route" index
+        if down {
+            if self.selected_route >= max {
+                self.selected_route = 0;
+            } else {
+                self.selected_route += 1;
+            }
+        } else {
+            if self.selected_route == 0 {
+                self.selected_route = max;
+            } else {
+                self.selected_route -= 1;
+            }
+        }
+    }
+
     pub fn start_editing(&mut self, target: InputTarget) {
         self.input_mode = true;
         self.input_target = target;
@@ -828,6 +893,45 @@ impl App {
             }
         }
         false
+    }
+
+    pub fn resize_panes(&mut self, col: u16) {
+        let area = self.last_area;
+        if area.width < 10 {
+            return;
+        }
+
+        // Percentage of the click position relative to the main area.
+        // main[1] is the cols area, but for simplicity we use the full width
+        // and adjust for the fact that cols starts at 0 and ends at width.
+        let pct = (col as f32 / area.width as f32 * 100.0) as u16;
+
+        // Determine which boundary is closer: Explorer/Editor or Editor/Viewer.
+        let d1 = (pct as i16 - self.pane_widths[0] as i16).abs();
+        let d2 = (pct as i16 - (self.pane_widths[0] + self.pane_widths[1]) as i16).abs();
+
+        if d1 < d2 {
+            // Adjust Explorer/Editor boundary.
+            let new_w0 = pct.clamp(10, 80);
+            let diff = new_w0 as i16 - self.pane_widths[0] as i16;
+            let new_w1 = (self.pane_widths[1] as i16 - diff).max(10) as u16;
+            self.pane_widths[0] = new_w0;
+            self.pane_widths[1] = new_w1;
+        } else {
+            // Adjust Editor/Viewer boundary.
+            let new_w01 = pct.clamp(20, 90);
+            let diff = new_w01 as i16 - (self.pane_widths[0] + self.pane_widths[1]) as i16;
+            let new_w1 = (self.pane_widths[1] as i16 + diff).max(10) as u16;
+            let new_w2 = (self.pane_widths[2] as i16 - diff).max(10) as u16;
+            self.pane_widths[1] = new_w1;
+            self.pane_widths[2] = new_w2;
+        }
+
+        // Ensure they sum to 100.
+        let sum: u16 = self.pane_widths.iter().sum();
+        if sum != 100 {
+            self.pane_widths[2] = 100u16.saturating_sub(self.pane_widths[0] + self.pane_widths[1]);
+        }
     }
 }
 

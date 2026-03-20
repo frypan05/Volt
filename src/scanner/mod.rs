@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use ignore::WalkBuilder;
 use regex::Regex;
@@ -33,8 +32,6 @@ impl RouteInfo {
 #[derive(Debug, Clone)]
 pub struct ScannerReport {
     pub routes: Vec<RouteInfo>,
-    pub files_scanned: usize,
-    pub duration_ms: u128,
 }
 
 pub fn scan_current_dir() -> anyhow::Result<ScannerReport> {
@@ -42,9 +39,7 @@ pub fn scan_current_dir() -> anyhow::Result<ScannerReport> {
 }
 
 pub fn scan_dir(root: &Path) -> anyhow::Result<ScannerReport> {
-    let started_at = Instant::now();
     let mut routes = BTreeSet::new();
-    let mut files_scanned = 0usize;
 
     let walker = WalkBuilder::new(root)
         .hidden(false)
@@ -68,7 +63,6 @@ pub fn scan_dir(root: &Path) -> anyhow::Result<ScannerReport> {
         let Ok(content) = fs::read_to_string(path) else {
             continue;
         };
-        files_scanned += 1;
         for route in extract_routes(path, &content) {
             routes.insert(route);
         }
@@ -76,8 +70,6 @@ pub fn scan_dir(root: &Path) -> anyhow::Result<ScannerReport> {
 
     Ok(ScannerReport {
         routes: routes.into_iter().collect(),
-        files_scanned,
-        duration_ms: started_at.elapsed().as_millis(),
     })
 }
 

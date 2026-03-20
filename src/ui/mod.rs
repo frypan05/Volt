@@ -55,9 +55,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(35),
-            Constraint::Percentage(40),
+            Constraint::Percentage(app.pane_widths[0]),
+            Constraint::Percentage(app.pane_widths[1]),
+            Constraint::Percentage(app.pane_widths[2]),
         ])
         .split(main[1]);
 
@@ -137,7 +137,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" / ", key),
         Span::raw("view "),
         Span::styled(" y ", key),
-        Span::raw("copy "),
+        Span::raw("copy response "),
         Span::raw(" | "),
         Span::raw(&app.status_message),
         extra,
@@ -634,7 +634,7 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
         );
         frame.render_widget(
             Paragraph::new(Span::styled(
-                " j/k scroll  PgUp/Dn  / view  y copy",
+                " j/k scroll  PgUp/Dn  / view  y copy response",
                 Style::default().fg(V_COMMENT),
             )),
             hint,
@@ -1105,7 +1105,7 @@ fn render_multiline_with_cursor(buf: &crate::app::TextBuffer) -> Vec<Line<'stati
         .collect()
 }
 
-fn pane_block(title: &str, focused: bool) -> Block {
+fn pane_block(title: &str, focused: bool) -> Block<'_> {
     let (color, bt) = if focused {
         (V_TEAL, BorderType::Thick)
     } else {

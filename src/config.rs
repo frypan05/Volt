@@ -39,12 +39,6 @@ impl AppConfig {
         Ok(toml::from_str(&content).unwrap_or_default())
     }
 
-    pub fn save(&self) -> anyhow::Result<()> {
-        let content = toml::to_string_pretty(self)?;
-        fs::write(Self::path(), content)?;
-        Ok(())
-    }
-
     fn path() -> PathBuf {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
