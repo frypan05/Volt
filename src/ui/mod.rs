@@ -12,7 +12,7 @@ use ratatui::widgets::{
 use crate::app::{App, BodyType, CustomRouteField, EditorTab, FocusPane, HttpMethod, InputTarget};
 use crate::ui::highlight::ResponseView;
 
-// Vesper palette — single source of truth for the whole UI
+// Vesper palette
 const V_FG: Color = Color::Rgb(0xcc, 0xc9, 0xc2);
 const V_COMMENT: Color = Color::Rgb(0x4d, 0x4d, 0x4d);
 const V_ORANGE: Color = Color::Rgb(0xff, 0x98, 0x57);
@@ -22,7 +22,7 @@ const V_BLUE: Color = Color::Rgb(0x5b, 0xa2, 0xd0);
 const V_PINK: Color = Color::Rgb(0xd6, 0x7a, 0x9c);
 
 // ---------------------------------------------------------------------------
-// Top-level
+// Top-level draw
 // ---------------------------------------------------------------------------
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -65,6 +65,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_editor(frame, app, cols[1]);
     draw_viewer(frame, app, cols[2]);
 
+    // Overlays — drawn last so they sit on top of everything.
     if app.url_history_open && app.url_history.len() > 1 {
         draw_url_history_dropdown(frame, app, cols[1]);
     }
@@ -74,6 +75,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.pending_request {
         draw_loader(frame, app, cols[2]);
     }
+    // View picker popup — highest overlay priority.
+    if app.view_picker_open {
+        draw_view_picker_popup(frame, app);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +86,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 // ---------------------------------------------------------------------------
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
-    let hl_indicator = if app.response.highlight_pending {
+    let hl = if app.response.highlight_pending {
         Span::styled("  [hl…]", Style::default().fg(V_COMMENT))
     } else {
         Span::raw("")
@@ -99,7 +104,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             format!("{} env vars", app.env_vars.len()),
             Style::default().fg(V_YELLOW),
         ),
-        hl_indicator,
+        hl,
     ]);
     frame.render_widget(Paragraph::new(text), area);
 }
@@ -107,7 +112,12 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let key = Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD);
     let extra = if app.body_type_focused {
-        Span::styled("  ←/→ body type  Esc back", Style::default().fg(V_YELLOW))
+        Span::styled("  ←/→ body type  Esc/← back", Style::default().fg(V_YELLOW))
+    } else if app.view_picker_open {
+        Span::styled(
+            "  j/k select  Enter confirm  Esc cancel  1-5 quick pick",
+            Style::default().fg(V_YELLOW),
+        )
     } else {
         Span::raw("")
     };
@@ -124,8 +134,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw("row "),
         Span::styled(" r ", key),
         Span::raw("run "),
-        Span::styled(" [/] ", key),
+        Span::styled(" / ", key),
         Span::raw("view "),
+        Span::styled(" y ", key),
+        Span::raw("copy "),
         Span::raw(" | "),
         Span::raw(&app.status_message),
         extra,
@@ -160,15 +172,12 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let sentinel_style = if app.selected_is_add_custom() {
+    let ss = if app.selected_is_add_custom() {
         Style::default().fg(Color::Green)
     } else {
         Style::default().fg(V_COMMENT)
     };
-    items.push(ListItem::new(Span::styled(
-        " + Add custom route",
-        sentinel_style,
-    )));
+    items.push(ListItem::new(Span::styled(" + Add custom route", ss)));
 
     let list = List::new(items).highlight_style(Style::default().bg(Color::Indexed(237)));
     let mut state = ratatui::widgets::ListState::default();
@@ -275,7 +284,7 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
         EditorTab::Body => return,
     };
     let tbl_h = area.height.saturating_sub(1);
-    let constraints = [
+    let constr = [
         Constraint::Length(5),
         Constraint::Percentage(47),
         Constraint::Percentage(47),
@@ -285,7 +294,7 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
     let hdr = Rect::new(area.x, area.y, area.width, 1);
     let hcols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(constraints)
+        .constraints(constr)
         .split(hdr);
     frame.render_widget(Paragraph::new("").bg(Color::Indexed(236)), hdr);
     frame.render_widget(
@@ -307,7 +316,6 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
         hcols[2],
     );
 
-    // Separator
     if area.height > 1 {
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -318,7 +326,6 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
         );
     }
 
-    // Data rows
     for (i, row) in rows.iter().enumerate() {
         let row_y = area.y + 2 + i as u16;
         if row_y >= area.y + tbl_h {
@@ -334,7 +341,7 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
 
         let cells = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints(constraints)
+            .constraints(constr)
             .split(row_area);
         let focused =
             app.input_mode && app.input_target == InputTarget::Tab(tab) && draft.active_row == i;
@@ -377,8 +384,6 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Add-row button
-    let btn_y = area.y + area.height - 1;
     let btn_label = match tab {
         EditorTab::Headers => " + Add header",
         EditorTab::Params => " + Add param",
@@ -393,7 +398,7 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ))
         .bg(Color::Indexed(235)),
-        Rect::new(area.x, btn_y, area.width, 1),
+        Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
 }
 
@@ -437,7 +442,7 @@ fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect) {
     if draft.body_type == BodyType::None {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                " Select a body type with ←/→, then i to edit",
+                " Select a body type with ←/→, then press i to edit",
                 Style::default().fg(V_COMMENT),
             ))
             .block(block),
@@ -445,6 +450,7 @@ fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect) {
         );
         return;
     }
+
     let content = if editing {
         render_multiline_with_cursor(&draft.body)
     } else if draft.body.text.is_empty() {
@@ -473,10 +479,16 @@ fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = vec![Span::styled(" Type: ", Style::default().fg(V_COMMENT))];
     for btype in &BodyType::ALL {
         let sel = draft.body_type == *btype;
-        let style = if sel {
+        // Highlight selected; if in sub-mode also highlight the whole row with a border tint.
+        let style = if sel && app.body_type_focused {
             Style::default()
                 .fg(Color::Black)
                 .bg(V_ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else if sel {
+            Style::default()
+                .fg(Color::Black)
+                .bg(V_TEAL)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(V_COMMENT)
@@ -486,17 +498,20 @@ fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect) {
     }
     if app.body_type_focused {
         spans.push(Span::styled(
-            "  ←/→ change  Esc back",
+            "  ←/→ change  Esc/← back",
             Style::default().fg(V_YELLOW),
         ));
     } else {
-        spans.push(Span::styled("  ←/→", Style::default().fg(V_COMMENT)));
+        spans.push(Span::styled(
+            "  ←/→ to select",
+            Style::default().fg(V_COMMENT),
+        ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ---------------------------------------------------------------------------
-// Viewer / Response
+// Viewer / Response pane
 // ---------------------------------------------------------------------------
 
 fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
@@ -565,7 +580,7 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     if view_sel_h > 0 {
-        draw_response_view_selector(frame, app, chunks[1]);
+        draw_response_view_bar(frame, app, chunks[1]);
     }
 
     if body_h == 0 {
@@ -576,7 +591,7 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
     if res.highlighted.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                " No response — press r to send",
+                " No response — press r to send  |  / to set view format",
                 Style::default().fg(V_COMMENT),
             )),
             body_area,
@@ -589,7 +604,6 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
     let max_sc = total.saturating_sub(visible);
     let scroll = app.viewer_scroll.min(max_sc);
 
-    // Render paragraph in a slightly narrower area to leave room for scrollbar
     let para_area = Rect {
         width: body_area.width.saturating_sub(1),
         ..body_area
@@ -611,7 +625,6 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_stateful_widget(sb, body_area, &mut ss);
     }
 
-    // Scroll hint at the bottom of the body area
     if app.focus == FocusPane::Viewer && total > visible {
         let hint = Rect::new(
             body_area.x,
@@ -621,7 +634,7 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
         );
         frame.render_widget(
             Paragraph::new(Span::styled(
-                " j/k scroll  PgUp/Dn  [/] view",
+                " j/k scroll  PgUp/Dn  / view  y copy",
                 Style::default().fg(V_COMMENT),
             )),
             hint,
@@ -629,7 +642,8 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_response_view_selector(frame: &mut Frame, app: &App, area: Rect) {
+/// Compact one-line view-mode bar shown under the metrics block.
+fn draw_response_view_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = vec![Span::styled(" View: ", Style::default().fg(V_COMMENT))];
     for v in &ResponseView::ALL {
         let sel = app.response.view == *v;
@@ -644,8 +658,121 @@ fn draw_response_view_selector(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(format!(" {} ", v.label()), style));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::styled("[/]", Style::default().fg(V_COMMENT)));
+    spans.push(Span::styled(" / to change", Style::default().fg(V_COMMENT)));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+// ---------------------------------------------------------------------------
+// View picker popup
+// ---------------------------------------------------------------------------
+
+fn draw_view_picker_popup(frame: &mut Frame, app: &App) {
+    let frame_area = frame.area();
+
+    // Size: wide enough to hold all labels + descriptions, short enough to be unobtrusive.
+    let popup_w: u16 = 38;
+    // 2 border + 1 title gap + 1 per option + 1 hint = 5 rows minimum
+    let popup_h: u16 = (ResponseView::ALL.len() as u16) + 4;
+
+    // Centre the popup over the response pane (right 40% of content area).
+    let x = (frame_area.width.saturating_sub(popup_w)) / 2;
+    let y = (frame_area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(
+        x,
+        y,
+        popup_w.min(frame_area.width),
+        popup_h.min(frame_area.height),
+    );
+
+    frame.render_widget(Clear, popup_area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD))
+        .title(Span::styled(
+            " Response View ",
+            Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD),
+        ));
+    let inner = outer.inner(popup_area);
+    frame.render_widget(outer, popup_area);
+
+    if inner.height == 0 {
+        return;
+    }
+
+    // One row per view option
+    let option_h = ResponseView::ALL.len() as u16;
+    let hint_h = inner.height.saturating_sub(option_h);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(option_h), Constraint::Min(hint_h)])
+        .split(inner);
+
+    // Descriptions shown next to each option
+    let descriptions: [&str; 5] = [
+        "detect from Content-Type",
+        "pretty-print JSON",
+        "syntax highlight HTML",
+        "plain text, no markup",
+        "raw bytes, no processing",
+    ];
+
+    let items: Vec<ListItem> = ResponseView::ALL
+        .iter()
+        .zip(descriptions.iter())
+        .enumerate()
+        .map(|(i, (v, desc))| {
+            let is_cur = app.response.view == *v;
+            let num = Span::styled(format!(" {} ", i + 1), Style::default().fg(V_COMMENT));
+            let label = if is_cur {
+                Span::styled(
+                    format!("{:<5}", v.label()),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(V_TEAL)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(format!("{:<5}", v.label()), Style::default().fg(V_FG))
+            };
+            let sep = Span::styled("  ", Style::default());
+            let desc = Span::styled(*desc, Style::default().fg(V_COMMENT));
+            ListItem::new(Line::from(vec![num, label, sep, desc]))
+        })
+        .collect();
+
+    let list = List::new(items).highlight_style(Style::default().bg(Color::Indexed(237)));
+
+    // Use a ListState so the currently selected item appears highlighted.
+    let mut state = ratatui::widgets::ListState::default();
+    let cur_idx = ResponseView::ALL
+        .iter()
+        .position(|v| *v == app.response.view)
+        .unwrap_or(0);
+    state.select(Some(cur_idx));
+
+    frame.render_stateful_widget(list, chunks[0], &mut state);
+
+    // Hint row at the bottom of the popup
+    if hint_h > 0 {
+        let key = Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("j/k", key),
+                Span::raw(" move  "),
+                Span::styled("Enter", key),
+                Span::raw(" pick  "),
+                Span::styled("1-5", key),
+                Span::raw(" quick  "),
+                Span::styled("Esc", key),
+                Span::raw(" close"),
+            ])),
+            chunks[1],
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -803,7 +930,7 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App) {
             } else {
                 Style::default().fg(Color::Indexed(238))
             });
-        let pi_inner = mb.inner(rows[1]);
+        let pill_inner = mb.inner(rows[1]);
         frame.render_widget(mb, rows[1]);
         let mc = HttpMethod::ALL.len() as u32;
         let pc = Layout::default()
@@ -813,7 +940,7 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App) {
                     .map(|_| Constraint::Ratio(1, mc))
                     .collect::<Vec<_>>(),
             )
-            .split(pi_inner);
+            .split(pill_inner);
         for (i, m) in HttpMethod::ALL.iter().enumerate() {
             let is_sel = *m == d.method;
             let (bg, fg, mo) = if is_sel {

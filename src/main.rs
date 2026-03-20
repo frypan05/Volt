@@ -7,6 +7,7 @@ mod ui;
 use std::io;
 use std::time::Duration;
 
+use crate::ui::highlight::ResponseView;
 use app::{App, AppMsg, BodyType, CustomRouteField, EditorTab, FocusPane, InputTarget};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -16,12 +17,7 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // -----------------------------------------------------------------------
-    // Pre-warm syntect statics BEFORE the event loop starts.
-    // We AWAIT the task so the first request never pays the cold-start cost.
-    // spawn_blocking runs on a dedicated OS thread so it doesn't block the
-    // async executor while it deserialises the ~8 MB syntax data.
-    // -----------------------------------------------------------------------
+    // Pre-warm syntect statics — AWAITED so first request has zero cold-start.
     tokio::task::spawn_blocking(ui::highlight::prewarm)
         .await
         .expect("prewarm panicked");
@@ -41,8 +37,6 @@ async fn main() -> anyhow::Result<()> {
     let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout))?;
 
     loop {
-        // Drain every pending message before drawing so the response appears
-        // on the very next frame.
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 AppMsg::RawResult(result) => app.apply_raw_result(result),
@@ -56,8 +50,6 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
 
-        // Poll at 5 ms while a request is in-flight so we pick up the result
-        // within milliseconds of it arriving.  Idle: 50 ms saves CPU.
         let poll_ms: u64 = if app.pending_request || app.response.highlight_pending {
             5
         } else {
@@ -93,28 +85,46 @@ async fn main() -> anyhow::Result<()> {
 
 async fn handle_key(app: &mut App, key: KeyEvent) {
     // -----------------------------------------------------------------------
-    // Global: response view cycling works from ANY pane / mode.
+    // View picker popup — highest priority overlay, handles its own keys.
+    // Opened with '/' from anywhere, closed with Esc or a selection.
     // -----------------------------------------------------------------------
-    match key.code {
-        KeyCode::Char('<') | KeyCode::Char('[') => {
-            app.cycle_response_view(false);
-            return;
+    if app.view_picker_open {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                app.view_picker_open = false;
+            }
+            // Number shortcuts 1-5
+            KeyCode::Char('1') => app.select_view(ResponseView::Auto),
+            KeyCode::Char('2') => app.select_view(ResponseView::Json),
+            KeyCode::Char('3') => app.select_view(ResponseView::Html),
+            KeyCode::Char('4') => app.select_view(ResponseView::Text),
+            KeyCode::Char('5') => app.select_view(ResponseView::Raw),
+            // j/k or arrow keys move selection, Enter confirms
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.response.view = app.response.view.next();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.response.view = app.response.view.prev();
+            }
+            KeyCode::Enter => {
+                // Confirm current selection and close
+                let view = app.response.view;
+                app.select_view(view);
+            }
+            _ => {}
         }
-        KeyCode::Char('>') | KeyCode::Char(']') => {
-            app.cycle_response_view(true);
-            return;
-        }
-        _ => {}
+        return;
     }
 
-    // Dialog takes full priority.
+    // Dialog takes full priority over editor modes.
     if app.custom_route_dialog.is_some() {
         handle_dialog_key(app, key);
         return;
     }
 
     // -----------------------------------------------------------------------
-    // Text / KV editing mode
+    // Text / KV editing mode — must be checked BEFORE any shortcut that uses
+    // characters like '/' so that typing into URL/path fields is never stolen.
     // -----------------------------------------------------------------------
     if app.input_mode {
         match key.code {
@@ -220,21 +230,37 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
     }
 
     // -----------------------------------------------------------------------
-    // Body-type selector sub-mode
+    // Body-type selector sub-mode (None / JSON / Text / Form row).
+    //
+    // FIX: Esc now navigates back to the Auth tab (the tab immediately
+    // before Body), not just clears a flag and leaves the user stranded.
+    // The user can also press ← when already at the leftmost type (None)
+    // to exit back to Auth, mirroring how ← on Params wraps to Body.
     // -----------------------------------------------------------------------
     if app.body_type_focused {
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => {
-                let d = app.current_draft_mut();
-                d.body_type = d.body_type.prev();
+                // If we are already on None (leftmost), exit the sub-mode
+                // back to the Auth tab — feels like continuing to move left.
+                if app.current_draft().body_type == BodyType::None {
+                    app.body_type_focused = false;
+                    app.editor_tab = EditorTab::Auth;
+                } else {
+                    let d = app.current_draft_mut();
+                    d.body_type = d.body_type.prev();
+                }
             }
             KeyCode::Right | KeyCode::Char('l') => {
+                // Wrap at the rightmost (Form) back to None — or just cycle.
                 let d = app.current_draft_mut();
                 d.body_type = d.body_type.next();
             }
+            // Esc or ↑ or k: exit sub-mode and move focus to the Auth tab.
             KeyCode::Esc | KeyCode::Up | KeyCode::Char('k') => {
                 app.body_type_focused = false;
+                app.editor_tab = EditorTab::Auth;
             }
+            // 'i' enters body text edit (only if a type other than None is chosen).
             KeyCode::Char('i') => {
                 if app.current_draft().body_type != BodyType::None {
                     app.body_type_focused = false;
@@ -275,12 +301,30 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Home if app.focus == FocusPane::Viewer => app.viewer_scroll = 0,
         KeyCode::End if app.focus == FocusPane::Viewer => app.viewer_scroll = u16::MAX,
 
-        // Editor tab navigation
+        // View picker / cycling — ONLY when Viewer pane is focused and not in
+        // any input mode, so '/' typed in URL fields or custom-route paths is
+        // never swallowed by this shortcut.
+        KeyCode::Char('/') if app.focus == FocusPane::Viewer => app.open_view_picker(),
+        KeyCode::Char('[') if app.focus == FocusPane::Viewer => app.cycle_response_view(false),
+        KeyCode::Char(']') if app.focus == FocusPane::Viewer => app.cycle_response_view(true),
+
+        // Copy response body to clipboard — 'y' (yank) while Viewer is focused.
+        KeyCode::Char('y') if app.focus == FocusPane::Viewer => {
+            if app.copy_response_to_clipboard() {
+                app.status_message = "Copied response to clipboard".to_string();
+            } else {
+                app.status_message = "Nothing to copy".to_string();
+            }
+        }
+
+        // Editor tab navigation with h / l / arrows.
+        // When already on the Body tab, ← / → enters the body-type sub-mode
+        // WITHOUT immediately changing the type — the user first sees the
+        // selector highlighted, then uses ← / → to change.
         KeyCode::Char('h') | KeyCode::Left if app.focus == FocusPane::Editor => {
             if app.editor_tab == EditorTab::Body {
+                // Enter body-type selector without changing the value yet.
                 app.body_type_focused = true;
-                let d = app.current_draft_mut();
-                d.body_type = d.body_type.prev();
             } else {
                 app.editor_tab = app.editor_tab.prev();
             }
@@ -288,8 +332,6 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('l') | KeyCode::Right if app.focus == FocusPane::Editor => {
             if app.editor_tab == EditorTab::Body {
                 app.body_type_focused = true;
-                let d = app.current_draft_mut();
-                d.body_type = d.body_type.next();
             } else {
                 app.editor_tab = app.editor_tab.next();
             }
@@ -302,6 +344,7 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                 if app.current_draft().body_type != BodyType::None {
                     app.start_editing(InputTarget::Tab(EditorTab::Body));
                 } else {
+                    // No type chosen yet — drop into selector so user picks one first.
                     app.body_type_focused = true;
                 }
             } else {

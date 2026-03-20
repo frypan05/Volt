@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::Duration;
 
 use arboard::Clipboard;
-use ratatui::text::Line;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -337,12 +338,8 @@ impl RequestDraft {
 // Channel messages
 // ---------------------------------------------------------------------------
 
-/// The HTTP task sends RawResult immediately when bytes arrive.
-/// A separate highlight task then sends HighlightResult.
 pub enum AppMsg {
-    /// Raw response — shown instantly, no highlighting yet.
     RawResult(HttpResult),
-    /// Highlighted lines arrive separately, a few ms later.
     HighlightResult(Vec<Line<'static>>),
 }
 
@@ -357,10 +354,8 @@ pub struct ResponseState {
     pub size_bytes: usize,
     pub content_type: String,
     pub body: String,
-    /// Starts as plain_lines() immediately; replaced by rich highlighting later.
     pub highlighted: Vec<Line<'static>>,
     pub view: ResponseView,
-    /// True while the highlight task is still running.
     pub highlight_pending: bool,
 }
 
@@ -377,7 +372,15 @@ pub struct App {
     pub editor_tab: EditorTab,
     pub input_mode: bool,
     pub input_target: InputTarget,
+
+    /// True when the user is in the body-type selector row (←/→ changes type).
+    /// Esc from here returns to the Auth tab (one tab to the left of Body).
     pub body_type_focused: bool,
+
+    /// True when the `/` key has been pressed and the view-picker popup
+    /// should be shown over the response pane.
+    pub view_picker_open: bool,
+
     pub drafts: HashMap<String, RequestDraft>,
     pub url_history: Vec<String>,
     pub url_history_index: Option<usize>,
@@ -443,6 +446,7 @@ impl App {
             input_mode: false,
             input_target: InputTarget::Tab(EditorTab::Params),
             body_type_focused: false,
+            view_picker_open: false,
             drafts: HashMap::new(),
             url_history,
             url_history_index: None,
@@ -507,10 +511,25 @@ impl App {
         }
     }
 
-    // -- Response view cycling ---------------------------------------------
+    // -- View picker -------------------------------------------------------
 
-    /// Cycle view mode and immediately re-highlight from the stored body.
-    /// Because the body is already in RAM this is instant even for JSON.
+    /// Open the response-view picker popup.
+    pub fn open_view_picker(&mut self) {
+        if !self.response.body.is_empty() {
+            self.view_picker_open = true;
+        }
+    }
+
+    /// Select a specific view mode from the picker, then close it.
+    pub fn select_view(&mut self, view: ResponseView) {
+        self.response.view = view;
+        self.view_picker_open = false;
+        self.spawn_highlight_task();
+        self.response.highlighted = highlight::plain_lines(&self.response.body);
+    }
+
+    // -- Response view cycling ([ / ]) -------------------------------------
+
     pub fn cycle_response_view(&mut self, forward: bool) {
         if self.response.body.is_empty() {
             return;
@@ -520,9 +539,7 @@ impl App {
         } else {
             self.response.view.prev()
         };
-        // Kick off async highlight so we don't block the UI thread.
         self.spawn_highlight_task();
-        // Show plain lines immediately as a placeholder until highlight arrives.
         self.response.highlighted = highlight::plain_lines(&self.response.body);
     }
 
@@ -535,7 +552,6 @@ impl App {
         self.pending_request = true;
         self.loader_tick = 0;
         self.viewer_scroll = 0;
-        // Clear old response immediately so the UI shows the spinner.
         self.response.highlighted = Vec::new();
         self.response.body = String::new();
         self.response.status_code = None;
@@ -547,32 +563,26 @@ impl App {
 
         tokio::spawn(async move {
             let result = http::execute(client, route, draft).await;
-            // Send the raw result immediately — UI updates without waiting for highlighting.
             let _ = tx.send(AppMsg::RawResult(result));
         });
     }
 
-    /// Called by apply_raw_result to start highlighting in the background.
     fn spawn_highlight_task(&mut self) {
         let body = self.response.body.clone();
         let content_type = self.response.content_type.clone();
         let view = self.response.view;
         let tx = self.msg_tx.clone();
         self.response.highlight_pending = true;
-        // spawn_blocking so syntect (CPU-bound) doesn't block the async executor.
         tokio::task::spawn_blocking(move || {
             let lines = highlight::render_body(&content_type, &body, view);
             let _ = tx.send(AppMsg::HighlightResult(lines));
         });
     }
 
-    /// Apply a raw HTTP response.  Shows body as plain text immediately,
-    /// then fires a background task to produce highlighted lines.
     pub fn apply_raw_result(&mut self, result: HttpResult) {
         self.pending_request = false;
         match result {
             Ok(res) => {
-                // Show plain body instantly — zero highlighting cost on this path.
                 self.response.highlighted = highlight::plain_lines(&res.body);
                 self.response.status_code = Some(res.status_code);
                 self.response.latency_ms = Some(res.latency_ms);
@@ -584,7 +594,6 @@ impl App {
                     self.response.status_code.unwrap(),
                     self.response.latency_ms.unwrap(),
                 );
-                // Now start the highlight task in the background.
                 self.spawn_highlight_task();
             }
             Err(e) => {
@@ -595,11 +604,9 @@ impl App {
         }
     }
 
-    /// Apply pre-computed highlighted lines when the background task finishes.
     pub fn apply_highlight_result(&mut self, lines: Vec<Line<'static>>) {
         self.response.highlighted = lines;
         self.response.highlight_pending = false;
-        // Update status bar to remove the "(highlighting…)" suffix.
         if let (Some(code), Some(ms)) = (self.response.status_code, self.response.latency_ms) {
             self.status_message = format!("{} in {}ms", code, ms);
         }
@@ -806,14 +813,27 @@ impl App {
     pub fn selected_is_add_custom(&self) -> bool {
         self.selected_route == self.filtered_routes.len()
     }
+
+    // -- Copy response body to clipboard -----------------------------------
+
+    /// Copy the raw response body to the system clipboard.
+    /// Returns true if successful so the caller can update the status bar.
+    pub fn copy_response_to_clipboard(&mut self) -> bool {
+        if self.response.body.is_empty() {
+            return false;
+        }
+        if let Some(cb) = self.clipboard.as_mut() {
+            if cb.set_text(self.response.body.clone()).is_ok() {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
-
-use ratatui::style::{Color, Style};
-use ratatui::text::Span;
 
 pub fn human_bytes(size: usize) -> String {
     if size < 1024 {
