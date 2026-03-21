@@ -65,7 +65,9 @@ async fn main() -> anyhow::Result<()> {
                 {
                     app.handle_mouse_click(m.column, m.row);
                 }
-                Event::Mouse(m) if m.kind == MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                Event::Mouse(m)
+                    if m.kind == MouseEventKind::Drag(crossterm::event::MouseButton::Left) =>
+                {
                     app.resize_panes(m.column);
                 }
                 Event::Mouse(m) if m.kind == MouseEventKind::ScrollUp => {
@@ -296,6 +298,11 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('j') | KeyCode::Up if app.focus == FocusPane::Explorer => {
             app.move_explorer_selection(false);
+        }
+
+        // Delete selected custom route — only active in Explorer pane.
+        KeyCode::Char('d') if app.focus == FocusPane::Explorer => {
+            app.delete_selected_custom_route();
         }
 
         // Viewer scroll

@@ -29,9 +29,60 @@ impl RouteInfo {
     }
 }
 
+/// On-disk representation of a user-created custom route.  Stores the route
+/// itself plus the base URL the user had set when they created it so that the
+/// full request URL is restored on next launch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedRoute {
+    #[serde(flatten)]
+    pub route: RouteInfo,
+    /// The base URL that was active when this route was saved, e.g.
+    /// `"http://localhost:8080"`.  Empty string means "use the app default".
+    pub base_url: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScannerReport {
     pub routes: Vec<RouteInfo>,
+    /// Base URLs keyed by route id, loaded from the persisted file.
+    /// Handed to `App::new` so it can pre-populate the draft map.
+    pub persisted_base_urls: std::collections::HashMap<String, String>,
+}
+
+/// File name used to persist user-created custom routes.
+pub const CUSTOM_ROUTES_FILE: &str = ".volt_routes.json";
+
+/// Load persisted custom routes from `.volt_routes.json` in `root`.
+/// Returns an empty vec if the file does not exist or cannot be parsed.
+pub fn load_persisted_routes(root: &Path) -> Vec<PersistedRoute> {
+    let path = root.join(CUSTOM_ROUTES_FILE);
+    let Ok(content) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<PersistedRoute>>(&content).unwrap_or_default()
+}
+
+/// Persist `routes` (only those whose framework == "custom") together with
+/// their associated base URLs to `.volt_routes.json` in `root`.
+/// `base_urls` is a map from route id -> base_url string.
+/// Silently ignores write errors.
+pub fn save_custom_routes(
+    root: &Path,
+    routes: &[RouteInfo],
+    base_urls: &std::collections::HashMap<String, String>,
+) {
+    let persisted: Vec<PersistedRoute> = routes
+        .iter()
+        .filter(|r| r.framework == "custom")
+        .map(|r| PersistedRoute {
+            base_url: base_urls.get(&r.id()).cloned().unwrap_or_default(),
+            route: r.clone(),
+        })
+        .collect();
+    let path = root.join(CUSTOM_ROUTES_FILE);
+    if let Ok(json) = serde_json::to_string_pretty(&persisted) {
+        let _ = fs::write(path, json);
+    }
 }
 
 pub fn scan_current_dir() -> anyhow::Result<ScannerReport> {
@@ -68,8 +119,16 @@ pub fn scan_dir(root: &Path) -> anyhow::Result<ScannerReport> {
         }
     }
 
+    // Merge persisted custom routes and collect their base URLs.
+    let mut persisted_base_urls = std::collections::HashMap::new();
+    for pr in load_persisted_routes(root) {
+        persisted_base_urls.insert(pr.route.id(), pr.base_url);
+        routes.insert(pr.route);
+    }
+
     Ok(ScannerReport {
         routes: routes.into_iter().collect(),
+        persisted_base_urls,
     })
 }
 

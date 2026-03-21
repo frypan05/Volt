@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
 use crate::http::{self, HttpResult};
-use crate::scanner::{RouteInfo, ScannerReport};
+use crate::scanner::{self, RouteInfo, ScannerReport};
 use crate::ui::highlight::{self, ResponseView};
 
 // ---------------------------------------------------------------------------
@@ -392,6 +392,15 @@ pub struct App {
     pub custom_route_dialog: Option<CustomRouteDialog>,
     pub last_area: ratatui::layout::Rect,
     pub http_client: reqwest::Client,
+
+    /// The working directory Volt was launched from.  Used to read/write the
+    /// persisted custom-routes file.
+    pub working_dir: std::path::PathBuf,
+
+    /// Snapshot of the base URL for each custom route id, kept in sync with
+    /// `drafts` whenever a custom route is confirmed or deleted.  This is
+    /// what gets written to `.volt_routes.json`.
+    pub custom_route_base_urls: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,6 +440,25 @@ impl App {
             .build()
             .expect("failed to build reqwest client");
 
+        let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+        // Pre-populate drafts for custom routes that have a persisted base URL
+        // so the correct URL is shown the moment the user selects them.
+        let fallback_base = url_history
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "http://localhost:3000".into());
+
+        let mut drafts: HashMap<String, RequestDraft> = HashMap::new();
+        for (id, base_url) in &report.persisted_base_urls {
+            let url = if base_url.is_empty() {
+                fallback_base.clone()
+            } else {
+                base_url.clone()
+            };
+            drafts.insert(id.clone(), RequestDraft::new(url));
+        }
+
         Self {
             routes: routes.clone(),
             filtered_routes: routes,
@@ -442,7 +470,7 @@ impl App {
             pane_widths: [25, 35, 40],
             body_type_focused: false,
             view_picker_open: false,
-            drafts: HashMap::new(),
+            drafts,
             url_history,
             url_history_index: None,
             url_history_open: false,
@@ -458,6 +486,8 @@ impl App {
             custom_route_dialog: None,
             last_area: ratatui::layout::Rect::default(),
             http_client,
+            working_dir,
+            custom_route_base_urls: report.persisted_base_urls,
         }
     }
 
@@ -707,7 +737,8 @@ impl App {
         }
 
         let w0 = (area.width as f32 * (self.pane_widths[0] as f32 / 100.0)) as u16;
-        let w01 = (area.width as f32 * ((self.pane_widths[0] + self.pane_widths[1]) as f32 / 100.0)) as u16;
+        let w01 = (area.width as f32 * ((self.pane_widths[0] + self.pane_widths[1]) as f32 / 100.0))
+            as u16;
 
         if col < w0 {
             // Explorer pane
@@ -851,6 +882,21 @@ impl App {
         if !url.is_empty() && !self.url_history.contains(&url) {
             self.url_history.insert(0, url);
         }
+
+        // If the user just edited the base URL for a custom route, keep the
+        // persisted snapshot in sync and write to disk immediately.
+        if let Some(route) = self.current_route() {
+            if route.framework == "custom" {
+                let id = route.id();
+                let base_url = self.current_draft().base_url.text.clone();
+                self.custom_route_base_urls.insert(id, base_url);
+                scanner::save_custom_routes(
+                    &self.working_dir,
+                    &self.routes,
+                    &self.custom_route_base_urls,
+                );
+            }
+        }
     }
 
     pub fn open_custom_route_dialog(&mut self) {
@@ -863,21 +909,67 @@ impl App {
 
     pub fn confirm_custom_route(&mut self) {
         if let Some(d) = self.custom_route_dialog.take() {
-            self.routes.push(RouteInfo {
+            // Capture the base URL that is currently set in the editor before
+            // we push the new route (which would change `current_route()`).
+            let base_url = self.current_draft().base_url.text.clone();
+
+            let route = RouteInfo {
                 method: d.method,
                 path: d.path.text,
                 framework: "custom".into(),
                 source: std::path::PathBuf::from("custom"),
                 line: 0,
-            });
+            };
+            let id = route.id();
+            self.routes.push(route);
             self.filtered_routes = self.routes.clone();
             self.selected_route = self.filtered_routes.len() - 1;
+
+            // Store the base URL for this new custom route in both the draft
+            // map (so it appears immediately in the editor) and the snapshot
+            // map (so it is written to disk).
+            self.drafts
+                .insert(id.clone(), RequestDraft::new(base_url.clone()));
+            self.custom_route_base_urls.insert(id, base_url);
+
+            scanner::save_custom_routes(
+                &self.working_dir,
+                &self.routes,
+                &self.custom_route_base_urls,
+            );
         }
+    }
+
+    /// Delete the currently selected route, but only if it is a custom route
+    /// (framework == "custom").  Adjusts the selection and persists the change.
+    pub fn delete_selected_custom_route(&mut self) {
+        let Some(route) = self.filtered_routes.get(self.selected_route) else {
+            return;
+        };
+        if route.framework != "custom" {
+            self.status_message = "Only custom routes can be deleted".to_string();
+            return;
+        }
+        let id = route.id();
+        self.routes.retain(|r| r.id() != id);
+        self.filtered_routes.retain(|r| r.id() != id);
+        self.custom_route_base_urls.remove(&id);
+        if self.selected_route > 0 && self.selected_route >= self.filtered_routes.len() {
+            self.selected_route = self.filtered_routes.len().saturating_sub(1);
+        }
+        scanner::save_custom_routes(
+            &self.working_dir,
+            &self.routes,
+            &self.custom_route_base_urls,
+        );
+        self.status_message = "Custom route deleted".to_string();
     }
 
     pub fn selected_is_add_custom(&self) -> bool {
         self.selected_route == self.filtered_routes.len()
     }
+
+    /// Returns true if the currently selected route is a custom (user-created) route.
 
     // -- Copy response body to clipboard -----------------------------------
 
@@ -901,24 +993,18 @@ impl App {
             return;
         }
 
-        // Percentage of the click position relative to the main area.
-        // main[1] is the cols area, but for simplicity we use the full width
-        // and adjust for the fact that cols starts at 0 and ends at width.
         let pct = (col as f32 / area.width as f32 * 100.0) as u16;
 
-        // Determine which boundary is closer: Explorer/Editor or Editor/Viewer.
         let d1 = (pct as i16 - self.pane_widths[0] as i16).abs();
         let d2 = (pct as i16 - (self.pane_widths[0] + self.pane_widths[1]) as i16).abs();
 
         if d1 < d2 {
-            // Adjust Explorer/Editor boundary.
             let new_w0 = pct.clamp(10, 80);
             let diff = new_w0 as i16 - self.pane_widths[0] as i16;
             let new_w1 = (self.pane_widths[1] as i16 - diff).max(10) as u16;
             self.pane_widths[0] = new_w0;
             self.pane_widths[1] = new_w1;
         } else {
-            // Adjust Editor/Viewer boundary.
             let new_w01 = pct.clamp(20, 90);
             let diff = new_w01 as i16 - (self.pane_widths[0] + self.pane_widths[1]) as i16;
             let new_w1 = (self.pane_widths[1] as i16 + diff).max(10) as u16;
@@ -927,7 +1013,6 @@ impl App {
             self.pane_widths[2] = new_w2;
         }
 
-        // Ensure they sum to 100.
         let sum: u16 = self.pane_widths.iter().sum();
         if sum != 100 {
             self.pane_widths[2] = 100u16.saturating_sub(self.pane_widths[0] + self.pane_widths[1]);

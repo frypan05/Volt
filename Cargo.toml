@@ -2,6 +2,11 @@
 name = "volt"
 version = "0.1.0"
 edition = "2024"
+description = "A terminal HTTP client for developers."
+license = "MIT"
+homepage = "https://github.com/frypan05/volt"
+repository = "https://github.com/frypan05/volt"
+readme = "README.md"
 
 [profile.release]
 lto = true
