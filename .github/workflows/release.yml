@@ -50,9 +50,9 @@ jobs:
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf volt-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
-          mv volt-${{ matrix.target }}.tar.gz ../../../
+            BINARY_PATH="target/${{ matrix.target }}/release/${{ matrix.artifact }}"
+            ARCHIVE="volt-${{ matrix.target }}.tar.gz"
+            tar czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" "${{ matrix.artifact }}"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
