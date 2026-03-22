@@ -10,7 +10,37 @@ volt is a terminal-native API client inspired by `lazygit` and `lazydocker`.
 - JSON pretty-printing and syntax-aware response rendering
 - Clipboard copy for response bodies and lightweight `.volt.toml` persistence
 
-## Run
+## Installation
+
+### Linux / macOS
+```bash
+curl https://raw.githubusercontent.com/frypan05/Volt/main/scripts/install.sh | bash
+```
+
+The script installs to `$HOME/.local/bin` by default. Change it with the `DIR` variable:
+```bash
+curl https://raw.githubusercontent.com/frypan05/Volt/main/scripts/install.sh | DIR=/usr/local/bin bash
+```
+
+### Windows (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/frypan05/Volt/main/scripts/install.ps1 | iex
+```
+
+### Homebrew
+```bash
+brew tap frypan05/volt
+brew install volt
+```
+
+### After installing
+Navigate to any project and run:
+```bash
+cd your-project
+volt
+```
+
+## Run in dev mode:
 
 ```bash
 cargo run
