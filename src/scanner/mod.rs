@@ -29,31 +29,22 @@ impl RouteInfo {
     }
 }
 
-/// On-disk representation of a user-created custom route.  Stores the route
-/// itself plus the base URL the user had set when they created it so that the
-/// full request URL is restored on next launch.
+/// On-disk representation of a user-created custom route.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedRoute {
     #[serde(flatten)]
     pub route: RouteInfo,
-    /// The base URL that was active when this route was saved, e.g.
-    /// `"http://localhost:8080"`.  Empty string means "use the app default".
     pub base_url: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ScannerReport {
     pub routes: Vec<RouteInfo>,
-    /// Base URLs keyed by route id, loaded from the persisted file.
-    /// Handed to `App::new` so it can pre-populate the draft map.
     pub persisted_base_urls: std::collections::HashMap<String, String>,
 }
 
-/// File name used to persist user-created custom routes.
 pub const CUSTOM_ROUTES_FILE: &str = ".volt_routes.json";
 
-/// Load persisted custom routes from `.volt_routes.json` in `root`.
-/// Returns an empty vec if the file does not exist or cannot be parsed.
 pub fn load_persisted_routes(root: &Path) -> Vec<PersistedRoute> {
     let path = root.join(CUSTOM_ROUTES_FILE);
     let Ok(content) = fs::read_to_string(&path) else {
@@ -62,10 +53,6 @@ pub fn load_persisted_routes(root: &Path) -> Vec<PersistedRoute> {
     serde_json::from_str::<Vec<PersistedRoute>>(&content).unwrap_or_default()
 }
 
-/// Persist `routes` (only those whose framework == "custom") together with
-/// their associated base URLs to `.volt_routes.json` in `root`.
-/// `base_urls` is a map from route id -> base_url string.
-/// Silently ignores write errors.
 pub fn save_custom_routes(
     root: &Path,
     routes: &[RouteInfo],
@@ -119,7 +106,6 @@ pub fn scan_dir(root: &Path) -> anyhow::Result<ScannerReport> {
         }
     }
 
-    // Merge persisted custom routes and collect their base URLs.
     let mut persisted_base_urls = std::collections::HashMap::new();
     for pr in load_persisted_routes(root) {
         persisted_base_urls.insert(pr.route.id(), pr.base_url);
@@ -135,7 +121,7 @@ pub fn scan_dir(root: &Path) -> anyhow::Result<ScannerReport> {
 fn is_supported(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|ext| ext.to_str()),
-        Some("rs" | "js" | "ts" | "py")
+        Some("rs" | "js" | "ts" | "py" | "jsx" | "tsx" | "vue" | "svelte")
     )
 }
 
@@ -145,6 +131,11 @@ fn extract_routes(path: &Path, content: &str) -> Vec<RouteInfo> {
     routes.extend(extract_actix(path, content));
     routes.extend(extract_express(path, content));
     routes.extend(extract_fastapi(path, content));
+    routes.extend(extract_nextjs(path, content));
+    routes.extend(extract_react_router(path, content));
+    routes.extend(extract_vue_router(path, content));
+    routes.extend(extract_svelte_kit(path, content));
+    routes.extend(extract_angular(path, content));
     routes
 }
 
@@ -262,6 +253,394 @@ fn extract_fastapi(path: &Path, content: &str) -> Vec<RouteInfo> {
             });
         }
     }
+    routes
+}
+
+fn extract_nextjs(path: &Path, content: &str) -> Vec<RouteInfo> {
+    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let path_str = path.to_string_lossy();
+    let mut routes = Vec::new();
+
+    // App Router — page.tsx / page.jsx / page.ts / page.js
+    if matches!(filename, "page.tsx" | "page.jsx" | "page.ts" | "page.js") {
+        if let Some(route_path) = nextjs_app_path(path) {
+            let method_re = Regex::new(
+                r#"export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)"#,
+            )
+            .unwrap();
+            let mut found_methods = false;
+            for cap in method_re.captures_iter(content) {
+                if let Ok(method) =
+                    HttpMethod::try_from(cap.get(1).unwrap().as_str().to_lowercase().as_str())
+                {
+                    routes.push(RouteInfo {
+                        method,
+                        path: route_path.clone(),
+                        framework: "next.js".to_string(),
+                        source: path.to_path_buf(),
+                        line: line_number(content, cap.get(0).unwrap().start()),
+                    });
+                    found_methods = true;
+                }
+            }
+            if !found_methods {
+                routes.push(RouteInfo {
+                    method: HttpMethod::Get,
+                    path: route_path,
+                    framework: "next.js".to_string(),
+                    source: path.to_path_buf(),
+                    line: 1,
+                });
+            }
+        }
+    }
+
+    // App Router API — route.ts / route.js
+    if matches!(
+        filename,
+        "route.ts" | "route.js" | "route.tsx" | "route.jsx"
+    ) {
+        if let Some(route_path) = nextjs_app_path(path) {
+            let method_re = Regex::new(
+                r#"export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)"#,
+            )
+            .unwrap();
+            for cap in method_re.captures_iter(content) {
+                if let Ok(method) =
+                    HttpMethod::try_from(cap.get(1).unwrap().as_str().to_lowercase().as_str())
+                {
+                    routes.push(RouteInfo {
+                        method,
+                        path: route_path.clone(),
+                        framework: "next.js".to_string(),
+                        source: path.to_path_buf(),
+                        line: line_number(content, cap.get(0).unwrap().start()),
+                    });
+                }
+            }
+        }
+    }
+
+    // Pages Router — files under /pages/ excluding special files
+    if path_str.contains("/pages/") || path_str.contains("\\pages\\") {
+        if !matches!(
+            filename,
+            "_app.tsx"
+                | "_app.jsx"
+                | "_app.js"
+                | "_app.ts"
+                | "_document.tsx"
+                | "_document.jsx"
+                | "_document.js"
+                | "_document.ts"
+                | "_error.tsx"
+                | "_error.jsx"
+                | "_error.js"
+                | "_error.ts"
+        ) {
+            if let Some(route_path) = nextjs_pages_path(path) {
+                let api_re =
+                    Regex::new(r#"export\s+(?:default\s+)?(?:async\s+)?function\s+handler"#)
+                        .unwrap();
+                if api_re.is_match(content) {
+                    let method_check_re = Regex::new(
+                        r#"req\.method\s*[=!]=\s*['"](GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)['"]"#,
+                    )
+                    .unwrap();
+                    let mut found = false;
+                    for cap in method_check_re.captures_iter(content) {
+                        if let Ok(method) = HttpMethod::try_from(
+                            cap.get(1).unwrap().as_str().to_lowercase().as_str(),
+                        ) {
+                            routes.push(RouteInfo {
+                                method,
+                                path: route_path.clone(),
+                                framework: "next.js".to_string(),
+                                source: path.to_path_buf(),
+                                line: line_number(content, cap.get(0).unwrap().start()),
+                            });
+                            found = true;
+                        }
+                    }
+                    if !found {
+                        routes.push(RouteInfo {
+                            method: HttpMethod::Get,
+                            path: route_path,
+                            framework: "next.js".to_string(),
+                            source: path.to_path_buf(),
+                            line: 1,
+                        });
+                    }
+                } else {
+                    routes.push(RouteInfo {
+                        method: HttpMethod::Get,
+                        path: route_path,
+                        framework: "next.js".to_string(),
+                        source: path.to_path_buf(),
+                        line: 1,
+                    });
+                }
+            }
+        }
+    }
+
+    routes
+}
+
+/// Convert a Next.js App Router file path to a route string.
+/// e.g. src/app/dashboard/settings/page.tsx -> /dashboard/settings
+fn nextjs_app_path(path: &Path) -> Option<String> {
+    let path_str = path.to_string_lossy();
+    let marker = if path_str.contains("/app/") {
+        "/app/"
+    } else if path_str.contains("\\app\\") {
+        "\\app\\"
+    } else {
+        return None;
+    };
+    let after_app = path_str.splitn(2, marker).nth(1)?;
+    // Remove the filename to get just the directory segment
+    let route_dir = std::path::Path::new(after_app).parent()?;
+    let route = route_dir.to_string_lossy();
+    // Convert Next.js dynamic segments [param] -> :param
+    let route = route.replace('[', ":").replace(']', "");
+    // Normalise Windows separators
+    let route = route.replace('\\', "/");
+    // Trim any accidental leading slash to avoid double-slash
+    let route = route.trim_start_matches('/').to_string();
+    if route.is_empty() {
+        Some("/".to_string())
+    } else {
+        Some(format!("/{}", route))
+    }
+}
+
+/// Convert a Next.js Pages Router file path to a route string.
+/// e.g. pages/dashboard/index.tsx -> /dashboard
+fn nextjs_pages_path(path: &Path) -> Option<String> {
+    let path_str = path.to_string_lossy();
+    let marker = if path_str.contains("/pages/") {
+        "/pages/"
+    } else if path_str.contains("\\pages\\") {
+        "\\pages\\"
+    } else {
+        return None;
+    };
+    let after_pages = path_str.splitn(2, marker).nth(1)?;
+    let p = std::path::Path::new(after_pages);
+    let stem = p.file_stem()?.to_string_lossy();
+    let parent = p
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let route = if stem == "index" {
+        if parent.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", parent)
+        }
+    } else {
+        let base = if parent.is_empty() {
+            stem.to_string()
+        } else {
+            format!("{}/{}", parent, stem)
+        };
+        let base = base.replace('[', ":").replace(']', "");
+        format!("/{}", base)
+    };
+    Some(route)
+}
+
+fn extract_react_router(path: &Path, content: &str) -> Vec<RouteInfo> {
+    // Gate on explicit react-router import to avoid false positives from
+    // any file that happens to contain a path: key in an object.
+    if !content.contains("react-router") && !content.contains("react-router-dom") {
+        return Vec::new();
+    }
+    let mut routes = Vec::new();
+
+    // JSX form: <Route path="/foo" />
+    let jsx_re = Regex::new(r#"<Route[^>]+path=["']([^"']+)["']"#).unwrap();
+    for cap in jsx_re.captures_iter(content) {
+        routes.push(RouteInfo {
+            method: HttpMethod::Get,
+            path: cap.get(1).unwrap().as_str().to_string(),
+            framework: "react-router".to_string(),
+            source: path.to_path_buf(),
+            line: line_number(content, cap.get(0).unwrap().start()),
+        });
+    }
+
+    // Object form — only inside a createBrowserRouter / createHashRouter /
+    // createMemoryRouter call to avoid matching arbitrary objects.
+    let factory_re = Regex::new(r#"create(?:Browser|Hash|Memory)Router\s*\(\s*\["#).unwrap();
+    if let Some(factory_match) = factory_re.find(content) {
+        let block_start = factory_match.end();
+        let block = &content[block_start..(block_start + 8192).min(content.len())];
+        let obj_path_re = Regex::new(r#"\bpath:\s*["']([^"']+)["']"#).unwrap();
+        for cap in obj_path_re.captures_iter(block) {
+            routes.push(RouteInfo {
+                method: HttpMethod::Get,
+                path: cap.get(1).unwrap().as_str().to_string(),
+                framework: "react-router".to_string(),
+                source: path.to_path_buf(),
+                line: line_number(content, factory_match.start() + cap.get(0).unwrap().start()),
+            });
+        }
+    }
+
+    routes
+}
+
+fn extract_vue_router(path: &Path, content: &str) -> Vec<RouteInfo> {
+    // Gate on explicit vue-router import or createRouter usage.
+    if !content.contains("vue-router")
+        && !content.contains("createRouter")
+        && !content.contains("VueRouter")
+    {
+        return Vec::new();
+    }
+
+    // Only extract path values that sit inside a routes array definition.
+    let anchor_re =
+        Regex::new(r#"(?:routes\s*:\s*\[|(?:const|let|var)\s+routes\s*=\s*\[)"#).unwrap();
+
+    let Some(anchor) = anchor_re.find(content) else {
+        return Vec::new();
+    };
+
+    let block_start = anchor.end();
+    let block = &content[block_start..(block_start + 16384).min(content.len())];
+    let path_re = Regex::new(r#"\bpath:\s*["']([^"']+)["']"#).unwrap();
+    let mut routes = Vec::new();
+
+    for cap in path_re.captures_iter(block) {
+        routes.push(RouteInfo {
+            method: HttpMethod::Get,
+            path: cap.get(1).unwrap().as_str().to_string(),
+            framework: "vue-router".to_string(),
+            source: path.to_path_buf(),
+            line: line_number(content, anchor.start() + cap.get(0).unwrap().start()),
+        });
+    }
+
+    routes
+}
+
+fn extract_svelte_kit(path: &Path, content: &str) -> Vec<RouteInfo> {
+    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let path_str = path.to_string_lossy();
+
+    if !path_str.contains("/routes/") && !path_str.contains("\\routes\\") {
+        return Vec::new();
+    }
+
+    let mut routes = Vec::new();
+    let route_path = sveltekit_route_path(path).unwrap_or_else(|| "/".to_string());
+
+    if matches!(filename, "+page.svelte" | "+page.ts" | "+page.js") {
+        routes.push(RouteInfo {
+            method: HttpMethod::Get,
+            path: route_path,
+            framework: "sveltekit".to_string(),
+            source: path.to_path_buf(),
+            line: 1,
+        });
+    } else if matches!(filename, "+server.ts" | "+server.js") {
+        let method_re = Regex::new(
+            r#"export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)"#,
+        )
+        .unwrap();
+        for cap in method_re.captures_iter(content) {
+            if let Ok(method) =
+                HttpMethod::try_from(cap.get(1).unwrap().as_str().to_lowercase().as_str())
+            {
+                routes.push(RouteInfo {
+                    method,
+                    path: route_path.clone(),
+                    framework: "sveltekit".to_string(),
+                    source: path.to_path_buf(),
+                    line: line_number(content, cap.get(0).unwrap().start()),
+                });
+            }
+        }
+    }
+
+    routes
+}
+
+fn sveltekit_route_path(path: &Path) -> Option<String> {
+    let path_str = path.to_string_lossy();
+    let marker = if path_str.contains("/routes/") {
+        "/routes/"
+    } else {
+        "\\routes\\"
+    };
+    let after = path_str.splitn(2, marker).nth(1)?;
+    let dir = std::path::Path::new(after).parent()?;
+    let route = dir.to_string_lossy().replace('\\', "/");
+    // Strip SvelteKit (group) segments which are invisible in the URL
+    let route = Regex::new(r"\([^)]+\)/?")
+        .unwrap()
+        .replace_all(&route, "")
+        .to_string();
+    // Convert [param] -> :param
+    let route = route.replace('[', ":").replace(']', "");
+    let route = route.trim_matches('/').to_string();
+    if route.is_empty() {
+        Some("/".to_string())
+    } else {
+        Some(format!("/{}", route))
+    }
+}
+
+fn extract_angular(path: &Path, content: &str) -> Vec<RouteInfo> {
+    if !content.contains("RouterModule")
+        && !content.contains("Routes")
+        && !content.contains("provideRouter")
+    {
+        return Vec::new();
+    }
+
+    // Only scan inside a typed Routes array or forRoot/forChild call
+    // to avoid matching arbitrary objects with a path key.
+    let anchor_re = Regex::new(r#"(?:const|let|var)\s+\w+\s*:\s*Routes\s*=\s*\["#).unwrap();
+
+    let anchor = match anchor_re.find(content) {
+        Some(m) => m,
+        None => {
+            let fallback = Regex::new(r#"(?:forRoot|forChild)\s*\(\s*\["#).unwrap();
+            match fallback.find(content) {
+                Some(m) => m,
+                None => return Vec::new(),
+            }
+        }
+    };
+
+    let block_start = anchor.end();
+    let block = &content[block_start..(block_start + 16384).min(content.len())];
+    let path_re = Regex::new(r#"\bpath:\s*['"]([^'"]+)['"]"#).unwrap();
+    let mut routes = Vec::new();
+
+    for cap in path_re.captures_iter(block) {
+        let p = cap.get(1).unwrap().as_str();
+        if p == "**" {
+            continue;
+        }
+        let route_path = if p.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", p)
+        };
+        routes.push(RouteInfo {
+            method: HttpMethod::Get,
+            path: route_path,
+            framework: "angular".to_string(),
+            source: path.to_path_buf(),
+            line: line_number(content, anchor.start() + cap.get(0).unwrap().start()),
+        });
+    }
+
     routes
 }
 
