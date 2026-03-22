@@ -156,6 +156,33 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect) {
     if inner.height == 0 {
         return;
     }
+    if app.filtered_routes.is_empty() {
+        let msg = vec![
+            Line::from(Span::styled(
+                " No routes found in this directory.",
+                Style::default().fg(V_COMMENT),
+            )),
+            Line::from(Span::styled(
+                " Press Enter to add a custom route.",
+                Style::default().fg(V_COMMENT),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(msg), inner);
+        // Still render the "+ Add custom route" button
+        let btn_area = Rect::new(inner.x, inner.y + 2, inner.width, 1);
+        if btn_area.y < inner.y + inner.height {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " + Add custom route",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                btn_area,
+            );
+        }
+        return;
+    }
 
     let mut items: Vec<ListItem> = app
         .filtered_routes

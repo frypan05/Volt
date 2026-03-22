@@ -24,13 +24,13 @@ async fn main() -> anyhow::Result<()> {
 
     let config = config::AppConfig::load()?;
     let routes = scanner::scan_current_dir()?;
-    if routes.routes.is_empty() {
-        eprintln!("volt: no routes found in the current directory.");
-        eprintln!(
-            "Navigate to a project that uses axum, actix-web, express, fastify, or fastapi and run volt again."
-        );
-        return Ok(());
-    }
+    // if routes.routes.is_empty() {
+    //     eprintln!("volt: no routes found in the current directory.");
+    //     eprintln!(
+    //         "Navigate to a project that uses axum, actix-web, express, fastify, or fastapi and run volt again."
+    //     );
+    //     return Ok(());
+    // }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppMsg>();
     let mut app = App::new(routes, config, tx);
