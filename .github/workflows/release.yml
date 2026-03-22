@@ -87,36 +87,36 @@ jobs:
           files: artifacts/*
           generate_release_notes: true
 
-    update-brew:
-        name: Update Homebrew formula
-        needs: release
-        runs-on: ubuntu-latest
-        steps:
-          - uses: actions/checkout@v4
-            with:
-              repository: frypan05/homebrew-volt
-              token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-              path: homebrew-volt
+  update-brew:
+    name: Update Homebrew formula
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: frypan05/homebrew-volt
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-volt
 
-          - name: Compute checksums
-            run: |
-              echo "SHA_INTEL=$(curl -sL https://github.com/frypan05/Volt/releases/download/${{ github.ref_name }}/volt-x86_64-apple-darwin.tar.gz | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
-              echo "SHA_ARM=$(curl -sL https://github.com/frypan05/Volt/releases/download/${{ github.ref_name }}/volt-aarch64-apple-darwin.tar.gz | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
+      - name: Compute checksums
+        run: |
+          echo "SHA_INTEL=$(curl -sL https://github.com/frypan05/Volt/releases/download/${{ github.ref_name }}/volt-x86_64-apple-darwin.tar.gz | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
+          echo "SHA_ARM=$(curl -sL https://github.com/frypan05/Volt/releases/download/${{ github.ref_name }}/volt-aarch64-apple-darwin.tar.gz | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
 
-          - name: Update version and checksums
-            run: |
-              VERSION=${{ github.ref_name }}
-              VERSION=${VERSION#v}
-              cd homebrew-volt
-              sed -i "s/version \".*\"/version \"$VERSION\"/" Formula/volt.rb
-              sed -i "0,/sha256 \".*\"/{s/sha256 \".*\"/sha256 \"$SHA_INTEL\"/}" Formula/volt.rb
-              sed -i "0,/sha256 \".*\"/{/sha256 \"$SHA_INTEL\"/! s/sha256 \".*\"/sha256 \"$SHA_ARM\"/}" Formula/volt.rb
+      - name: Update version and checksums
+        run: |
+          VERSION=${{ github.ref_name }}
+          VERSION=${VERSION#v}
+          cd homebrew-volt
+          sed -i "s/version \".*\"/version \"$VERSION\"/" Formula/volt.rb
+          sed -i "0,/sha256 \".*\"/{s/sha256 \".*\"/sha256 \"$SHA_INTEL\"/}" Formula/volt.rb
+          sed -i "0,/sha256 \".*\"/{/sha256 \"$SHA_INTEL\"/! s/sha256 \".*\"/sha256 \"$SHA_ARM\"/}" Formula/volt.rb
 
-          - name: Push
-            run: |
-              cd homebrew-volt
-              git config user.email "actions@github.com"
-              git config user.name "GitHub Actions"
-              git add Formula/volt.rb
-              git commit -m "volt ${{ github.ref_name }}"
-              git push
+      - name: Push
+        run: |
+          cd homebrew-volt
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git add Formula/volt.rb
+          git commit -m "volt ${{ github.ref_name }}"
+          git push
