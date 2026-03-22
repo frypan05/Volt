@@ -1,15 +1,49 @@
 # volt
-
-volt is a terminal-native API client inspired by `lazygit` and `lazydocker`.
-
+ 
+volt is a terminal-native API client inspired by `lazygit` and `lazydocker`. Run it inside any project directory and it automatically discovers your routes, lets you edit and fire requests, and renders the response — all without leaving the terminal.
+ 
+![License](https://img.shields.io/github/license/frypan05/Volt)
+![Release](https://img.shields.io/github/v/release/frypan05/Volt)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-blue)
+ 
+---
+ 
 ## Features
-
-- 3-pane TUI for route discovery, request editing, and response viewing
-- Local route scanning for `axum`, `actix-web`, `express`, `fastify`, and `fastapi`
-- Async request execution with latency and payload metrics
-- JSON pretty-printing and syntax-aware response rendering
-- Clipboard copy for response bodies and lightweight `.volt.toml` persistence
-
+ 
+**Route discovery**
+Volt scans your current working directory and automatically detects routes from:
+ 
+| Backend | Frontend |
+|---|---|
+| `axum` | `next.js` (App Router + Pages Router) |
+| `actix-web` | `react-router` |
+| `express` / `fastify` | `vue-router` |
+| `fastapi` | `sveltekit` |
+| | `angular` |
+ 
+**Request editing**
+- Edit headers, query params, auth, and request body per route
+- Supports `JSON`, `plain text`, and `form-urlencoded` body types
+- Base URL editor with history — navigate previous URLs with `↑` / `↓`
+- Per-route drafts are preserved across panes
+ 
+**Response viewing**
+- Syntax-aware highlighting for JSON, HTML, and XML responses
+- JSON is automatically pretty-printed
+- Status code, latency, and response size shown on every request
+- Five view modes: Auto, JSON, HTML, Text, Raw — switch with `/`
+- Clipboard copy with `y`
+ 
+**Persistence**
+- Custom routes saved to `.volt_routes.json` in your project root — routes and their base URLs survive restarts
+- App config stored in `.volt.toml`
+ 
+**Workflow**
+- Works in directories with routes defined — opens the TUI with routes and you can add custom ones immediately (any directory functionality coming soon)
+- Resizable panes via click-and-drag
+- Mouse support throughout
+ 
+---
 ## Installation
 
 ### Linux / macOS
