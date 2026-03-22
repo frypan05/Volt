@@ -84,6 +84,7 @@ pub fn scan_dir(root: &Path) -> anyhow::Result<ScannerReport> {
         .git_ignore(true)
         .git_exclude(true)
         .parents(true)
+        .max_depth(Some(9))
         .build();
 
     for entry in walker.flatten() {
