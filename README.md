@@ -30,7 +30,7 @@ irm https://raw.githubusercontent.com/frypan05/Volt/main/scripts/install.ps1 | i
 ### Homebrew
 ```bash
 brew tap frypan05/volt
-brew install volt
+brew install frypan05/volt/volt
 ```
 
 ### After installing
