@@ -401,6 +401,9 @@ pub struct App {
     /// `drafts` whenever a custom route is confirmed or deleted.  This is
     /// what gets written to `.volt_routes.json`.
     pub custom_route_base_urls: HashMap<String, String>,
+
+    /// True if the directory Volt was opened in is a high-level directory (like Home).
+    pub is_too_broad: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,6 +491,7 @@ impl App {
             http_client,
             working_dir,
             custom_route_base_urls: report.persisted_base_urls,
+            is_too_broad: report.is_too_broad,
         }
     }
 

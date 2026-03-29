@@ -41,6 +41,7 @@ pub struct PersistedRoute {
 pub struct ScannerReport {
     pub routes: Vec<RouteInfo>,
     pub persisted_base_urls: std::collections::HashMap<String, String>,
+    pub is_too_broad: bool,
 }
 
 pub const CUSTOM_ROUTES_FILE: &str = ".volt_routes.json";
@@ -76,34 +77,72 @@ pub fn scan_current_dir() -> anyhow::Result<ScannerReport> {
     scan_dir(&std::env::current_dir()?)
 }
 
+fn is_too_broad_dir(path: &Path) -> bool {
+    // Check for Home directory
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        if path == Path::new(&home) {
+            return true;
+        }
+    }
+
+    // Check for Root directory
+    if path.parent().is_none() {
+        return true;
+    }
+
+    // Check for common high-level dirs if we can't get home env
+    #[cfg(windows)]
+    {
+        if let Some(s) = path.to_str() {
+            if s.to_lowercase().starts_with("c:\\users") && s.split('\\').count() <= 3 {
+                return true;
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Some(s) = path.to_str() {
+            if s.starts_with("/home/") && s.split('/').count() <= 3 {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 pub fn scan_dir(root: &Path) -> anyhow::Result<ScannerReport> {
+    let is_too_broad = is_too_broad_dir(root);
     let mut routes = BTreeSet::new();
 
-    let walker = WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .parents(true)
-        .max_depth(Some(9))
-        .build();
+    // If it's too broad, we skip the heavy recursive scan to avoid lag
+    if !is_too_broad {
+        let walker = WalkBuilder::new(root)
+            .hidden(false)
+            .git_ignore(true)
+            .git_exclude(true)
+            .parents(true)
+            .max_depth(Some(9))
+            .build();
 
-    for entry in walker.flatten() {
-        if !entry
-            .file_type()
-            .map(|kind| kind.is_file())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let path = entry.path();
-        if !is_supported(path) {
-            continue;
-        }
-        let Ok(content) = fs::read_to_string(path) else {
-            continue;
-        };
-        for route in extract_routes(path, &content) {
-            routes.insert(route);
+        for entry in walker.flatten() {
+            if !entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let path = entry.path();
+            if !is_supported(path) {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(path) else {
+                continue;
+            };
+            for route in extract_routes(path, &content) {
+                routes.insert(route);
+            }
         }
     }
 
@@ -116,6 +155,7 @@ pub fn scan_dir(root: &Path) -> anyhow::Result<ScannerReport> {
     Ok(ScannerReport {
         routes: routes.into_iter().collect(),
         persisted_base_urls,
+        is_too_broad,
     })
 }
 

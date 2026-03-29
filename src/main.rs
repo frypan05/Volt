@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
     let routes = scanner::scan_current_dir().unwrap_or_else(|_| scanner::ScannerReport {
         routes: Vec::new(),
         persisted_base_urls: std::collections::HashMap::new(),
+        is_too_broad: false,
     });
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppMsg>();

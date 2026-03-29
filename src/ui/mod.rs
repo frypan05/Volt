@@ -174,10 +174,18 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect) {
 
     // Empty state hint — shown as a dimmed item when no routes exist
     if app.filtered_routes.is_empty() {
-        items.push(ListItem::new(Span::styled(
-            " No routes found. Press Enter to add one.",
-            Style::default().fg(V_COMMENT),
-        )));
+        if app.is_too_broad {
+            items.push(ListItem::new(vec![
+                Line::from(Span::styled(" Too broad directory!", Style::default().fg(V_ORANGE).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(" Please open a project", Style::default().fg(V_YELLOW))),
+                Line::from(Span::styled(" directory for scanning.", Style::default().fg(V_YELLOW))),
+            ]));
+        } else {
+            items.push(ListItem::new(Span::styled(
+                " No routes found. Press Enter to add one.",
+                Style::default().fg(V_COMMENT),
+            )));
+        }
     }
 
     let ss = if app.selected_is_add_custom() {
