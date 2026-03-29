@@ -15,6 +15,7 @@ pub struct RouteConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub base_url: String,
+    pub theme: String,
     pub last_selected_route: Option<String>,
     pub drafts: HashMap<String, RouteConfig>,
 }
@@ -23,6 +24,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             base_url: "http://localhost:3000".to_string(),
+            theme: "vesper".to_string(),
             last_selected_route: None,
             drafts: HashMap::new(),
         }
@@ -36,7 +38,13 @@ impl AppConfig {
             return Ok(Self::default());
         }
         let content = fs::read_to_string(&path)?;
-        Ok(toml::from_str(&content).unwrap_or_default())
+        Ok(toml::from_str(&content).unwrap_or_else(|_| Self::default()))
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        let content = toml::to_string_pretty(self)?;
+        fs::write(Self::path(), content)?;
+        Ok(())
     }
 
     fn path() -> PathBuf {

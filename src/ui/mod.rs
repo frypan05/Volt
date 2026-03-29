@@ -12,14 +12,69 @@ use ratatui::widgets::{
 use crate::app::{App, BodyType, CustomRouteField, EditorTab, FocusPane, HttpMethod, InputTarget};
 use crate::ui::highlight::ResponseView;
 
-// Vesper palette
-const V_FG: Color = Color::Rgb(0xcc, 0xc9, 0xc2);
-const V_COMMENT: Color = Color::Rgb(0x4d, 0x4d, 0x4d);
-const V_ORANGE: Color = Color::Rgb(0xff, 0x98, 0x57);
-const V_YELLOW: Color = Color::Rgb(0xe5, 0xc0, 0x7b);
-const V_TEAL: Color = Color::Rgb(0x5c, 0xb8, 0xb2);
-const V_BLUE: Color = Color::Rgb(0x5b, 0xa2, 0xd0);
-const V_PINK: Color = Color::Rgb(0xd6, 0x7a, 0x9c);
+// ---------------------------------------------------------------------------
+// Themes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+pub struct Theme {
+    pub primary: Color,
+    pub fg: Color,
+    pub comment: Color,
+    pub orange: Color,
+    pub yellow: Color,
+    pub teal: Color,
+    pub blue: Color,
+    pub pink: Color,
+}
+
+impl Theme {
+    pub fn get(name: &str) -> Self {
+        match name.to_lowercase().as_str() {
+            "dracula" => Self {
+                primary: Color::Rgb(0x8b, 0xe9, 0xfd), // Teal/Cyan
+                fg: Color::Rgb(0xf8, 0xf8, 0xf2),
+                comment: Color::Rgb(0x62, 0x72, 0xa4),
+                orange: Color::Rgb(0xff, 0xb8, 0x6c),
+                yellow: Color::Rgb(0xf1, 0xfa, 0x8c),
+                teal: Color::Rgb(0x8b, 0xe9, 0xfd),
+                blue: Color::Rgb(0xbd, 0x93, 0xf9),
+                pink: Color::Rgb(0xff, 0x79, 0xc6),
+            },
+            "gruvbox" => Self {
+                primary: Color::Rgb(0x8e, 0xc0, 0x7c), // Aqua/Teal
+                fg: Color::Rgb(0xeb, 0xdb, 0xb2),
+                comment: Color::Rgb(0x92, 0x83, 0x74),
+                orange: Color::Rgb(0xfe, 0x80, 0x19),
+                yellow: Color::Rgb(0xfa, 0xbd, 0x2f),
+                teal: Color::Rgb(0x8e, 0xc0, 0x7c),
+                blue: Color::Rgb(0x83, 0xa5, 0x98),
+                pink: Color::Rgb(0xd3, 0x86, 0x9b),
+            },
+            "tokyo-night" => Self {
+                primary: Color::Rgb(0x73, 0xdc, 0xad), // Teal
+                fg: Color::Rgb(0xa9, 0xb1, 0xd6),
+                comment: Color::Rgb(0x56, 0x5f, 0x89),
+                orange: Color::Rgb(0xff, 0x9e, 0x64),
+                yellow: Color::Rgb(0xe0, 0xaf, 0x68),
+                teal: Color::Rgb(0x73, 0xdc, 0xad),
+                blue: Color::Rgb(0x7a, 0xa2, 0xf7),
+                pink: Color::Rgb(0xbb, 0x9a, 0xfe),
+            },
+            _ => Self {
+                // Vesper (Default)
+                primary: Color::Rgb(0x5c, 0xb8, 0xb2), // Teal
+                fg: Color::Rgb(0xcc, 0xc9, 0xc2),
+                comment: Color::Rgb(0x4d, 0x4d, 0x4d),
+                orange: Color::Rgb(0xff, 0x98, 0x57),
+                yellow: Color::Rgb(0xe5, 0xc0, 0x7b),
+                teal: Color::Rgb(0x5c, 0xb8, 0xb2),
+                blue: Color::Rgb(0x5b, 0xa2, 0xd0),
+                pink: Color::Rgb(0xd6, 0x7a, 0x9c),
+            },
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Top-level draw
@@ -29,6 +84,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     app.last_area = area;
     app.tick_loader();
+    let theme = Theme::get(&app.theme);
 
     if area.width < 40 || area.height < 8 {
         frame.render_widget(
@@ -49,8 +105,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .split(area);
 
-    draw_header(frame, app, main[0]);
-    draw_footer(frame, app, main[2]);
+    draw_header(frame, app, main[0], theme);
+    draw_footer(frame, app, main[2], theme);
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -61,23 +117,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .split(main[1]);
 
-    draw_explorer(frame, app, cols[0]);
-    draw_editor(frame, app, cols[1]);
-    draw_viewer(frame, app, cols[2]);
+    draw_explorer(frame, app, cols[0], theme);
+    draw_editor(frame, app, cols[1], theme);
+    draw_viewer(frame, app, cols[2], theme);
 
     // Overlays — drawn last so they sit on top of everything.
     if app.url_history_open && app.url_history.len() > 1 {
-        draw_url_history_dropdown(frame, app, cols[1]);
+        draw_url_history_dropdown(frame, app, cols[1], theme);
     }
     if app.custom_route_dialog.is_some() {
-        draw_custom_route_dialog(frame, app);
+        draw_custom_route_dialog(frame, app, theme);
     }
     if app.pending_request {
-        draw_loader(frame, app, cols[2]);
+        draw_loader(frame, app, cols[2], theme);
     }
     // View picker popup — highest overlay priority.
     if app.view_picker_open {
-        draw_view_picker_popup(frame, app);
+        draw_view_picker_popup(frame, app, theme);
     }
 }
 
@@ -85,9 +141,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 // Header / Footer
 // ---------------------------------------------------------------------------
 
-fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_header(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     let hl = if app.response.highlight_pending {
-        Span::styled("  [hl…]", Style::default().fg(V_COMMENT))
+        Span::styled("  [hl…]", Style::default().fg(theme.comment))
     } else {
         Span::raw("")
     };
@@ -95,28 +151,28 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(
             " VOLT ",
             Style::default()
-                .bg(V_ORANGE)
+                .bg(theme.primary)
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
         Span::styled(
             format!("{} env vars", app.env_vars.len()),
-            Style::default().fg(V_YELLOW),
+            Style::default().fg(theme.yellow),
         ),
         hl,
     ]);
     frame.render_widget(Paragraph::new(text), area);
 }
 
-fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let key = Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD);
+fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+    let key = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
     let extra = if app.body_type_focused {
-        Span::styled("  ←/→ body type  Esc/← back", Style::default().fg(V_YELLOW))
+        Span::styled("  ←/→ body type  Esc/← back", Style::default().fg(theme.yellow))
     } else if app.view_picker_open {
         Span::styled(
             "  j/k select  Enter confirm  Esc cancel  1-5 quick pick",
-            Style::default().fg(V_YELLOW),
+            Style::default().fg(theme.yellow),
         )
     } else {
         Span::raw("")
@@ -149,8 +205,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 // Explorer
 // ---------------------------------------------------------------------------
 
-fn draw_explorer(frame: &mut Frame, app: &App, area: Rect) {
-    let block = pane_block(" 1. EXPLORER ", app.focus == FocusPane::Explorer);
+fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+    let block = pane_block(" 1. EXPLORER ", app.focus == FocusPane::Explorer, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -161,7 +217,7 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect) {
         .filtered_routes
         .iter()
         .map(|r| {
-            let color = method_color(r.method.as_str());
+            let color = method_color(r.method.as_str(), theme);
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!(" {:<7}", r.method),
@@ -176,14 +232,14 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect) {
     if app.filtered_routes.is_empty() {
         if app.is_too_broad {
             items.push(ListItem::new(vec![
-                Line::from(Span::styled(" Too broad directory!", Style::default().fg(V_ORANGE).add_modifier(Modifier::BOLD))),
-                Line::from(Span::styled(" Please open a project", Style::default().fg(V_YELLOW))),
-                Line::from(Span::styled(" directory for scanning.", Style::default().fg(V_YELLOW))),
+                Line::from(Span::styled(" Too broad directory!", Style::default().fg(theme.orange).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(" Please open a project", Style::default().fg(theme.yellow))),
+                Line::from(Span::styled(" directory for scanning.", Style::default().fg(theme.yellow))),
             ]));
         } else {
             items.push(ListItem::new(Span::styled(
                 " No routes found. Press Enter to add one.",
-                Style::default().fg(V_COMMENT),
+                Style::default().fg(theme.comment),
             )));
         }
     }
@@ -191,7 +247,7 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect) {
     let ss = if app.selected_is_add_custom() {
         Style::default().fg(Color::Green)
     } else {
-        Style::default().fg(V_COMMENT)
+        Style::default().fg(theme.comment)
     };
     items.push(ListItem::new(Span::styled(" + Add custom route", ss)));
 
@@ -205,8 +261,8 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect) {
 // Editor
 // ---------------------------------------------------------------------------
 
-fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
-    let block = pane_block(" 2. EDITOR ", app.focus == FocusPane::Editor);
+fn draw_editor(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+    let block = pane_block(" 2. EDITOR ", app.focus == FocusPane::Editor, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 4 {
@@ -226,20 +282,20 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(inner);
 
-    draw_base_url(frame, app, chunks[0]);
+    draw_base_url(frame, app, chunks[0], theme);
     if tab_h > 0 {
-        draw_editor_tabs(frame, app, chunks[1]);
+        draw_editor_tabs(frame, app, chunks[1], theme);
     }
     if content_h > 0 {
         if app.editor_tab == EditorTab::Body {
-            draw_body_editor(frame, app, chunks[2]);
+            draw_body_editor(frame, app, chunks[2], theme);
         } else {
-            draw_kv_table(frame, app, chunks[2]);
+            draw_kv_table(frame, app, chunks[2], theme);
         }
     }
 }
 
-fn draw_base_url(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_base_url(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     if area.height == 0 {
         return;
     }
@@ -254,9 +310,9 @@ fn draw_base_url(frame: &mut Frame, app: &App, area: Rect) {
             " Base URL [u] "
         })
         .border_style(if editing {
-            Style::default().fg(V_YELLOW)
+            Style::default().fg(theme.yellow)
         } else {
-            Style::default().fg(V_COMMENT)
+            Style::default().fg(theme.comment)
         });
     let content = if editing {
         cursor_line(&draft.base_url, " ")
@@ -266,7 +322,7 @@ fn draw_base_url(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(content).block(block), area);
 }
 
-fn draw_editor_tabs(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_editor_tabs(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     if area.height == 0 {
         return;
     }
@@ -282,12 +338,12 @@ fn draw_editor_tabs(frame: &mut Frame, app: &App, area: Rect) {
             .position(|t| *t == app.editor_tab)
             .unwrap_or(0),
     )
-    .highlight_style(Style::default().fg(V_ORANGE).add_modifier(Modifier::BOLD))
+    .highlight_style(Style::default().fg(theme.primary).add_modifier(Modifier::BOLD))
     .divider("|");
     frame.render_widget(tabs, area);
 }
 
-fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     if area.height == 0 {
         return;
     }
@@ -365,7 +421,7 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
         let cb = if row.enabled {
             Style::default().fg(Color::Green)
         } else {
-            Style::default().fg(V_COMMENT)
+            Style::default().fg(theme.comment)
         };
         frame.render_widget(
             Paragraph::new(Span::styled(if row.enabled { " [x]" } else { " [ ]" }, cb)),
@@ -379,9 +435,9 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
             );
         } else {
             let (t, s) = if row.key.text.is_empty() {
-                (" key".into(), Style::default().fg(V_COMMENT))
+                (" key".into(), Style::default().fg(theme.comment))
             } else {
-                (format!(" {}", row.key.text), Style::default().fg(V_FG))
+                (format!(" {}", row.key.text), Style::default().fg(theme.fg))
             };
             frame.render_widget(Paragraph::new(Span::styled(t, s)), cells[1]);
         }
@@ -392,9 +448,9 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
             );
         } else {
             let (t, s) = if row.value.text.is_empty() {
-                (" value".into(), Style::default().fg(V_COMMENT))
+                (" value".into(), Style::default().fg(theme.comment))
             } else {
-                (format!(" {}", row.value.text), Style::default().fg(V_FG))
+                (format!(" {}", row.value.text), Style::default().fg(theme.fg))
             };
             frame.render_widget(Paragraph::new(Span::styled(t, s)), cells[2]);
         }
@@ -418,7 +474,7 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     if area.height == 0 {
         return;
     }
@@ -432,18 +488,18 @@ fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     if sel_h > 0 {
-        draw_body_type_selector(frame, app, chunks[0]);
+        draw_body_type_selector(frame, app, chunks[0], theme);
     }
     if body_h == 0 {
         return;
     }
 
     let bc = if editing {
-        V_YELLOW
+        theme.yellow
     } else if app.body_type_focused {
-        V_TEAL
+        theme.teal
     } else {
-        V_COMMENT
+        theme.comment
     };
     let block = Block::default()
         .title(if editing {
@@ -459,7 +515,7 @@ fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 " Select a body type with ←/→, then press i to edit",
-                Style::default().fg(V_COMMENT),
+                Style::default().fg(theme.comment),
             ))
             .block(block),
             chunks[1],
@@ -472,7 +528,7 @@ fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect) {
     } else if draft.body.text.is_empty() {
         vec![Line::from(Span::styled(
             " i: start editing",
-            Style::default().fg(V_COMMENT),
+            Style::default().fg(theme.comment),
         ))]
     } else {
         draft
@@ -490,24 +546,24 @@ fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     let draft = app.current_draft();
-    let mut spans: Vec<Span> = vec![Span::styled(" Type: ", Style::default().fg(V_COMMENT))];
+    let mut spans: Vec<Span> = vec![Span::styled(" Type: ", Style::default().fg(theme.comment))];
     for btype in &BodyType::ALL {
         let sel = draft.body_type == *btype;
         // Highlight selected; if in sub-mode also highlight the whole row with a border tint.
         let style = if sel && app.body_type_focused {
             Style::default()
                 .fg(Color::Black)
-                .bg(V_ORANGE)
+                .bg(theme.primary)
                 .add_modifier(Modifier::BOLD)
         } else if sel {
             Style::default()
                 .fg(Color::Black)
-                .bg(V_TEAL)
+                .bg(theme.teal)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(V_COMMENT)
+            Style::default().fg(theme.comment)
         };
         spans.push(Span::styled(format!(" {} ", btype.label()), style));
         spans.push(Span::raw(" "));
@@ -515,12 +571,12 @@ fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect) {
     if app.body_type_focused {
         spans.push(Span::styled(
             "  ←/→ change  Esc/← back",
-            Style::default().fg(V_YELLOW),
+            Style::default().fg(theme.yellow),
         ));
     } else {
         spans.push(Span::styled(
             "  ←/→ to select",
-            Style::default().fg(V_COMMENT),
+            Style::default().fg(theme.comment),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -530,8 +586,8 @@ fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect) {
 // Viewer / Response pane
 // ---------------------------------------------------------------------------
 
-fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
-    let block = pane_block(" 3. RESPONSE ", app.focus == FocusPane::Viewer);
+fn draw_viewer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+    let block = pane_block(" 3. RESPONSE ", app.focus == FocusPane::Viewer, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 3 {
@@ -554,14 +610,14 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
     let res = &app.response;
     let status_color = match res.status_code {
         Some(c) if c < 300 => Color::Green,
-        Some(c) if c < 400 => V_YELLOW,
+        Some(c) if c < 400 => theme.yellow,
         Some(_) => Color::Red,
-        None => V_COMMENT,
+        None => theme.comment,
     };
 
     let metrics = vec![
         Line::from(vec![
-            Span::styled(" Status: ", Style::default().fg(V_COMMENT)),
+            Span::styled(" Status: ", Style::default().fg(theme.comment)),
             Span::styled(
                 res.status_code.map(|c| c.to_string()).unwrap_or("-".into()),
                 Style::default()
@@ -570,24 +626,24 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
             ),
         ]),
         Line::from(vec![
-            Span::styled(" Time:   ", Style::default().fg(V_COMMENT)),
+            Span::styled(" Time:   ", Style::default().fg(theme.comment)),
             Span::styled(
                 res.latency_ms
                     .map(|l| format!("{}ms", l))
                     .unwrap_or("-".into()),
-                Style::default().fg(V_FG),
+                Style::default().fg(theme.fg),
             ),
         ]),
         Line::from(vec![
-            Span::styled(" Size:   ", Style::default().fg(V_COMMENT)),
+            Span::styled(" Size:   ", Style::default().fg(theme.comment)),
             Span::styled(
                 crate::app::human_bytes(res.size_bytes),
-                Style::default().fg(V_FG),
+                Style::default().fg(theme.fg),
             ),
         ]),
         Line::from(vec![
-            Span::styled(" Type:   ", Style::default().fg(V_COMMENT)),
-            Span::styled(res.content_type.clone(), Style::default().fg(V_BLUE)),
+            Span::styled(" Type:   ", Style::default().fg(theme.comment)),
+            Span::styled(res.content_type.clone(), Style::default().fg(theme.blue)),
         ]),
     ];
     frame.render_widget(
@@ -596,7 +652,7 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     if view_sel_h > 0 {
-        draw_response_view_bar(frame, app, chunks[1]);
+        draw_response_view_bar(frame, app, chunks[1], theme);
     }
 
     if body_h == 0 {
@@ -608,7 +664,7 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 " No response — press r to send  |  / to set view format",
-                Style::default().fg(V_COMMENT),
+                Style::default().fg(theme.comment),
             )),
             body_area,
         );
@@ -651,7 +707,7 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 " j/k scroll  PgUp/Dn  / view  y copy response",
-                Style::default().fg(V_COMMENT),
+                Style::default().fg(theme.comment),
             )),
             hint,
         );
@@ -659,22 +715,22 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Compact one-line view-mode bar shown under the metrics block.
-fn draw_response_view_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let mut spans: Vec<Span> = vec![Span::styled(" View: ", Style::default().fg(V_COMMENT))];
+fn draw_response_view_bar(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+    let mut spans: Vec<Span> = vec![Span::styled(" View: ", Style::default().fg(theme.comment))];
     for v in &ResponseView::ALL {
         let sel = app.response.view == *v;
         let style = if sel {
             Style::default()
                 .fg(Color::Black)
-                .bg(V_TEAL)
+                .bg(theme.teal)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(V_COMMENT)
+            Style::default().fg(theme.comment)
         };
         spans.push(Span::styled(format!(" {} ", v.label()), style));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::styled(" / to change", Style::default().fg(V_COMMENT)));
+    spans.push(Span::styled(" / to change", Style::default().fg(theme.comment)));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -682,7 +738,7 @@ fn draw_response_view_bar(frame: &mut Frame, app: &App, area: Rect) {
 // View picker popup
 // ---------------------------------------------------------------------------
 
-fn draw_view_picker_popup(frame: &mut Frame, app: &App) {
+fn draw_view_picker_popup(frame: &mut Frame, app: &App, theme: Theme) {
     let frame_area = frame.area();
 
     // Size: wide enough to hold all labels + descriptions, short enough to be unobtrusive.
@@ -705,10 +761,10 @@ fn draw_view_picker_popup(frame: &mut Frame, app: &App) {
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(theme.teal).add_modifier(Modifier::BOLD))
         .title(Span::styled(
             " Response View ",
-            Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(popup_area);
     frame.render_widget(outer, popup_area);
@@ -741,20 +797,20 @@ fn draw_view_picker_popup(frame: &mut Frame, app: &App) {
         .enumerate()
         .map(|(i, (v, desc))| {
             let is_cur = app.response.view == *v;
-            let num = Span::styled(format!(" {} ", i + 1), Style::default().fg(V_COMMENT));
+            let num = Span::styled(format!(" {} ", i + 1), Style::default().fg(theme.comment));
             let label = if is_cur {
                 Span::styled(
                     format!("{:<5}", v.label()),
                     Style::default()
                         .fg(Color::Black)
-                        .bg(V_TEAL)
+                        .bg(theme.teal)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                Span::styled(format!("{:<5}", v.label()), Style::default().fg(V_FG))
+                Span::styled(format!("{:<5}", v.label()), Style::default().fg(theme.fg))
             };
             let sep = Span::styled("  ", Style::default());
-            let desc = Span::styled(*desc, Style::default().fg(V_COMMENT));
+            let desc = Span::styled(*desc, Style::default().fg(theme.comment));
             ListItem::new(Line::from(vec![num, label, sep, desc]))
         })
         .collect();
@@ -773,7 +829,7 @@ fn draw_view_picker_popup(frame: &mut Frame, app: &App) {
 
     // Hint row at the bottom of the popup
     if hint_h > 0 {
-        let key = Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD);
+        let key = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(" "),
@@ -795,7 +851,7 @@ fn draw_view_picker_popup(frame: &mut Frame, app: &App) {
 // Loader overlay
 // ---------------------------------------------------------------------------
 
-fn draw_loader(frame: &mut Frame, app: &App, viewer_area: Rect) {
+fn draw_loader(frame: &mut Frame, app: &App, viewer_area: Rect, theme: Theme) {
     const FRAMES: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
     let spinner = FRAMES[(app.loader_tick as usize / 2) % FRAMES.len()];
     let w: u16 = 30;
@@ -810,16 +866,16 @@ fn draw_loader(frame: &mut Frame, app: &App, viewer_area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(V_TEAL));
+        .border_style(Style::default().fg(theme.teal));
     let inner = block.inner(overlay);
     frame.render_widget(block, overlay);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 format!(" {} ", spinner),
-                Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Waiting for response…", Style::default().fg(V_FG)),
+            Span::styled("Waiting for response…", Style::default().fg(theme.fg)),
         ]))
         .alignment(Alignment::Left),
         inner,
@@ -830,7 +886,7 @@ fn draw_loader(frame: &mut Frame, app: &App, viewer_area: Rect) {
 // URL history dropdown
 // ---------------------------------------------------------------------------
 
-fn draw_url_history_dropdown(frame: &mut Frame, app: &App, editor_area: Rect) {
+fn draw_url_history_dropdown(frame: &mut Frame, app: &App, editor_area: Rect, theme: Theme) {
     let dy = editor_area.y + 4;
     let max = 6usize;
     let vis = app.url_history.len().min(max);
@@ -846,7 +902,7 @@ fn draw_url_history_dropdown(frame: &mut Frame, app: &App, editor_area: Rect) {
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(V_YELLOW))
+        .border_style(Style::default().fg(theme.yellow))
         .title(" URL History (↑/↓) ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -859,11 +915,11 @@ fn draw_url_history_dropdown(frame: &mut Frame, app: &App, editor_area: Rect) {
             let sel = app.url_history_index == Some(i);
             let style = if sel {
                 Style::default()
-                    .bg(V_TEAL)
+                    .bg(theme.teal)
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(V_FG)
+                Style::default().fg(theme.fg)
             };
             ListItem::new(Span::styled(format!(" {}", url), style))
         })
@@ -875,7 +931,7 @@ fn draw_url_history_dropdown(frame: &mut Frame, app: &App, editor_area: Rect) {
 // Custom route dialog
 // ---------------------------------------------------------------------------
 
-fn draw_custom_route_dialog(frame: &mut Frame, app: &App) {
+fn draw_custom_route_dialog(frame: &mut Frame, app: &App, theme: Theme) {
     let Some(d) = &app.custom_route_dialog else {
         return;
     };
@@ -889,7 +945,7 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .title(" Add Custom Route ")
-        .border_style(Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD));
+        .border_style(Style::default().fg(theme.teal).add_modifier(Modifier::BOLD));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
     if inner.height < 4 {
@@ -924,9 +980,9 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App) {
             Paragraph::new(Span::styled(
                 " Method  (← / → to select, Tab to move to Path)",
                 if mf {
-                    Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD)
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(V_COMMENT)
+                    Style::default().fg(theme.comment)
                 },
             )),
             rows[0],
@@ -942,7 +998,7 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App) {
                 BorderType::Plain
             })
             .border_style(if mf {
-                Style::default().fg(V_TEAL)
+                Style::default().fg(theme.teal)
             } else {
                 Style::default().fg(Color::Indexed(238))
             });
@@ -960,9 +1016,9 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App) {
         for (i, m) in HttpMethod::ALL.iter().enumerate() {
             let is_sel = *m == d.method;
             let (bg, fg, mo) = if is_sel {
-                (method_pill_color(m.as_str()), Color::Black, Modifier::BOLD)
+                (method_pill_color(m.as_str(), theme), Color::Black, Modifier::BOLD)
             } else {
-                (Color::Indexed(236), V_COMMENT, Modifier::empty())
+                (Color::Indexed(236), theme.comment, Modifier::empty())
             };
             frame.render_widget(
                 Paragraph::new(Span::styled(
@@ -981,9 +1037,9 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App) {
             Paragraph::new(Span::styled(
                 " Path  (type route path, Enter to confirm)",
                 if pf {
-                    Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD)
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(V_COMMENT)
+                    Style::default().fg(theme.comment)
                 },
             )),
             rows[3],
@@ -999,7 +1055,7 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App) {
                 BorderType::Plain
             })
             .border_style(if pf {
-                Style::default().fg(V_YELLOW)
+                Style::default().fg(theme.yellow)
             } else {
                 Style::default().fg(Color::Indexed(238))
             });
@@ -1012,7 +1068,7 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App) {
     }
 
     if ht > 0 {
-        let key = Style::default().fg(V_TEAL).add_modifier(Modifier::BOLD);
+        let key = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(" "),
@@ -1121,11 +1177,11 @@ fn render_multiline_with_cursor(buf: &crate::app::TextBuffer) -> Vec<Line<'stati
         .collect()
 }
 
-fn pane_block(title: &str, focused: bool) -> Block<'_> {
+fn pane_block(title: &str, focused: bool, theme: Theme) -> Block<'_> {
     let (color, bt) = if focused {
-        (V_TEAL, BorderType::Thick)
+        (theme.teal, BorderType::Thick)
     } else {
-        (V_COMMENT, BorderType::Plain)
+        (theme.comment, BorderType::Plain)
     };
     Block::default()
         .borders(Borders::ALL)
@@ -1137,26 +1193,26 @@ fn pane_block(title: &str, focused: bool) -> Block<'_> {
         ))
 }
 
-fn method_color(m: &str) -> Color {
+fn method_color(m: &str, theme: Theme) -> Color {
     match m {
         "GET" => Color::Green,
-        "POST" => V_BLUE,
-        "PUT" => V_YELLOW,
-        "PATCH" => V_PINK,
+        "POST" => theme.blue,
+        "PUT" => theme.yellow,
+        "PATCH" => theme.pink,
         "DELETE" => Color::Red,
-        _ => V_TEAL,
+        _ => theme.teal,
     }
 }
 
-fn method_pill_color(m: &str) -> Color {
+fn method_pill_color(m: &str, theme: Theme) -> Color {
     match m {
         "GET" => Color::Green,
-        "POST" => V_BLUE,
-        "PUT" => V_YELLOW,
-        "PATCH" => V_PINK,
+        "POST" => theme.blue,
+        "PUT" => theme.yellow,
+        "PATCH" => theme.pink,
         "DELETE" => Color::Red,
-        "OPTIONS" => V_TEAL,
+        "OPTIONS" => theme.teal,
         "HEAD" => Color::Indexed(208),
-        _ => V_TEAL,
+        _ => theme.teal,
     }
 }

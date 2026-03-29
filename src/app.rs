@@ -404,6 +404,9 @@ pub struct App {
 
     /// True if the directory Volt was opened in is a high-level directory (like Home).
     pub is_too_broad: bool,
+
+    /// The selected theme name.
+    pub theme: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,6 +495,7 @@ impl App {
             working_dir,
             custom_route_base_urls: report.persisted_base_urls,
             is_too_broad: report.is_too_broad,
+            theme: config.theme,
         }
     }
 

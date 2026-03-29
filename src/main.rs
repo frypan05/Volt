@@ -14,15 +14,53 @@ use crossterm::event::{
     MouseEventKind,
 };
 use tokio::sync::mpsc;
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(name = "volt")]
+#[command(about = "A terminal HTTP client for developers.", long_about = None)]
+struct Cli {
+    /// List all available themes
+    #[arg(long)]
+    themes: bool,
+
+    /// Set the theme
+    #[arg(long)]
+    theme: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Pre-warm syntect statics — AWAITED so first request has zero cold-start.
+    let cli = Cli::parse();
+
+    let mut config = config::AppConfig::load()?;
+
+    if cli.themes {
+        let options = vec!["vesper", "dracula", "gruvbox", "tokyo-night"];
+        let ans = inquire::Select::new("Select a theme:", options).prompt();
+
+        match ans {
+            Ok(choice) => {
+                config.theme = choice.to_string();
+                config.save()?;
+                println!("Theme set to {}", config.theme);
+                return Ok(());
+            }
+            Err(_) => return Ok(()),
+        }
+    }
+
+    if let Some(theme) = cli.theme {
+        config.theme = theme;
+        config.save()?;
+        println!("Theme set to {}", config.theme);
+        return Ok(());
+    }
+
     tokio::task::spawn_blocking(ui::highlight::prewarm)
         .await
         .expect("prewarm panicked");
 
-    let config = config::AppConfig::load()?;
     let routes = scanner::scan_current_dir().unwrap_or_else(|_| scanner::ScannerReport {
         routes: Vec::new(),
         persisted_base_urls: std::collections::HashMap::new(),
