@@ -45,6 +45,8 @@ Volt scans your current working directory and automatically detects routes from:
 - **Themes**: Personalize Volt's look with built-in themes: `Vesper` (default), `Dracula`, `Gruvbox`, and `Tokyo-Night`.
 - **Interactive Selector**: Run `volt --themes` to open an interactive menu and switch themes on the fly.
 - **Dynamic UI**: UI accents and the `VOLT` header automatically adapt to your chosen theme's primary color.
+- **Version Check**: Run `volt --version` or `volt -V` to check your current version.
+- **Auto-Update**: Run `volt update` to automatically check for and install the latest version from GitHub.
 
 **Broad Directory Protection**
 

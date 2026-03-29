@@ -19,6 +19,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(name = "volt")]
 #[command(about = "A terminal HTTP client for developers.", long_about = None)]
+#[command(version)] // Automatically uses version from Cargo.toml
 struct Cli {
     /// List all available themes
     #[arg(long)]
@@ -27,11 +28,24 @@ struct Cli {
     /// Set the theme
     #[arg(long)]
     theme: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(clap::Subcommand)]
+enum Commands {
+    /// Update volt to the latest version from GitHub
+    Update,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    if let Some(Commands::Update) = cli.command {
+        return handle_update().await;
+    }
 
     let mut config = config::AppConfig::load()?;
 
@@ -136,6 +150,93 @@ async fn main() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 // Key handler
 // ---------------------------------------------------------------------------
+
+async fn handle_update() -> anyhow::Result<()> {
+    println!("Checking for updates...");
+    let client = reqwest::Client::builder()
+        .user_agent("volt-updater")
+        .build()?;
+
+    let release: serde_json::Value = client
+        .get("https://api.github.com/repos/frypan05/volt/releases/latest")
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let latest_tag = release["tag_name"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Could not find latest version tag"))?
+        .trim_start_matches('v');
+
+    let current_version = env!("CARGO_PKG_VERSION");
+
+    if latest_tag == current_version {
+        println!("You are already on the latest version (v{}).", current_version);
+        return Ok(());
+    }
+
+    println!("New version available: v{} (current: v{})", latest_tag, current_version);
+
+    let assets = release["assets"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("No assets found in latest release"))?;
+
+    // Determine target asset name based on OS
+    let target_os = std::env::consts::OS;
+    let asset_name = match target_os {
+        "windows" => "volt-windows.exe",
+        "linux" => "volt-linux",
+        "macos" => "volt-macos",
+        _ => return Err(anyhow::anyhow!("Unsupported OS for auto-update")),
+    };
+
+    let asset = assets
+        .iter()
+        .find(|a| a["name"].as_str() == Some(asset_name))
+        .ok_or_else(|| anyhow::anyhow!("Could not find binary for {} in latest release", target_os))?;
+
+    let download_url = asset["browser_download_url"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("No download URL for asset"))?;
+
+    println!("Downloading {}...", asset_name);
+    let bytes = client.get(download_url).send().await?.bytes().await?;
+
+    let current_exe = std::env::current_exe()?;
+    let tmp_exe = current_exe.with_extension("tmp");
+
+    std::fs::write(&tmp_exe, bytes)?;
+
+    // On Windows, we can't replace a running binary directly.
+    // We rename the current one and move the new one in.
+    #[cfg(windows)]
+    {
+        let old_exe = current_exe.with_extension("old");
+        if old_exe.exists() {
+            std::fs::remove_file(&old_exe)?;
+        }
+        std::fs::rename(&current_exe, &old_exe)?;
+        std::fs::rename(&tmp_exe, &current_exe)?;
+        println!("Update successful! You can now delete {:?}.", old_exe);
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(&tmp_exe, &current_exe)?;
+        // Ensure it's executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&current_exe)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&current_exe, perms)?;
+        }
+    }
+
+    println!("Successfully updated to v{}!", latest_tag);
+    Ok(())
+}
 
 async fn handle_key(app: &mut App, key: KeyEvent) {
     // -----------------------------------------------------------------------
