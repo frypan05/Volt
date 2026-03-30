@@ -1,6 +1,6 @@
 /target
 *.env
-
+.volt_routes.json
 # Added by cargo
 #
 # already existing elements were commented out
