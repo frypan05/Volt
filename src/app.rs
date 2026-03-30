@@ -357,6 +357,13 @@ pub struct ResponseState {
 // App
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeTarget {
+    None,
+    Split01, // Explorer <-> Editor
+    Split12, // Editor <-> Viewer
+}
+
 pub struct App {
     pub routes: Vec<RouteInfo>,
     pub filtered_routes: Vec<RouteInfo>,
@@ -367,6 +374,7 @@ pub struct App {
     pub input_target: InputTarget,
 
     pub pane_widths: [u16; 3],
+    pub resize_target: ResizeTarget,
 
     /// True when the user is in the body-type selector row (←/→ changes type).
     /// Esc from here returns to the Auth tab (one tab to the left of Body).
@@ -426,6 +434,7 @@ impl App {
     pub fn new(
         report: ScannerReport,
         config: AppConfig,
+        global_config: crate::config::GlobalConfig,
         msg_tx: mpsc::UnboundedSender<AppMsg>,
     ) -> Self {
         let routes = report.routes.clone();
@@ -495,7 +504,8 @@ impl App {
             working_dir,
             custom_route_base_urls: report.persisted_base_urls,
             is_too_broad: report.is_too_broad,
-            theme: config.theme,
+            theme: global_config.theme,
+            resize_target: ResizeTarget::None,
         }
     }
 
@@ -661,8 +671,19 @@ impl App {
             return;
         }
 
+        // Check if we clicked on a border for resizing
         let w0 = (area.width as f32 * (self.pane_widths[0] as f32 / 100.0)) as u16;
         let w1 = (area.width as f32 * (self.pane_widths[1] as f32 / 100.0)) as u16;
+
+        // Tolerance of 1 cell for grabbing the border
+        if (col as i16 - w0 as i16).abs() <= 1 {
+            self.resize_target = ResizeTarget::Split01;
+            return;
+        }
+        if (col as i16 - (w0 + w1) as i16).abs() <= 1 {
+            self.resize_target = ResizeTarget::Split12;
+            return;
+        }
 
         if col < w0 {
             self.focus = FocusPane::Explorer;
@@ -736,6 +757,16 @@ impl App {
         } else {
             self.focus = FocusPane::Viewer;
         }
+    }
+
+    pub fn handle_mouse_drag(&mut self, col: u16) {
+        if self.resize_target != ResizeTarget::None {
+            self.resize_panes(col);
+        }
+    }
+
+    pub fn handle_mouse_release(&mut self) {
+        self.resize_target = ResizeTarget::None;
     }
 
     pub fn handle_mouse_scroll(&mut self, col: u16, _row: u16, up: bool) {
@@ -1003,22 +1034,24 @@ impl App {
 
         let pct = (col as f32 / area.width as f32 * 100.0) as u16;
 
-        let d1 = (pct as i16 - self.pane_widths[0] as i16).abs();
-        let d2 = (pct as i16 - (self.pane_widths[0] + self.pane_widths[1]) as i16).abs();
-
-        if d1 < d2 {
-            let new_w0 = pct.clamp(10, 80);
-            let diff = new_w0 as i16 - self.pane_widths[0] as i16;
-            let new_w1 = (self.pane_widths[1] as i16 - diff).max(10) as u16;
-            self.pane_widths[0] = new_w0;
-            self.pane_widths[1] = new_w1;
-        } else {
-            let new_w01 = pct.clamp(20, 90);
-            let diff = new_w01 as i16 - (self.pane_widths[0] + self.pane_widths[1]) as i16;
-            let new_w1 = (self.pane_widths[1] as i16 + diff).max(10) as u16;
-            let new_w2 = (self.pane_widths[2] as i16 - diff).max(10) as u16;
-            self.pane_widths[1] = new_w1;
-            self.pane_widths[2] = new_w2;
+        match self.resize_target {
+            ResizeTarget::Split01 => {
+                let new_w0 = pct.clamp(10, 80);
+                let diff = new_w0 as i16 - self.pane_widths[0] as i16;
+                let new_w1 = (self.pane_widths[1] as i16 - diff).max(10) as u16;
+                self.pane_widths[0] = new_w0;
+                self.pane_widths[1] = new_w1;
+            }
+            ResizeTarget::Split12 => {
+                let w01 = self.pane_widths[0] + self.pane_widths[1];
+                let new_w01 = pct.clamp(20, 90);
+                let diff = new_w01 as i16 - w01 as i16;
+                let new_w1 = (self.pane_widths[1] as i16 + diff).max(10) as u16;
+                let new_w2 = (self.pane_widths[2] as i16 - diff).max(10) as u16;
+                self.pane_widths[1] = new_w1;
+                self.pane_widths[2] = new_w2;
+            }
+            ResizeTarget::None => {}
         }
 
         let sum: u16 = self.pane_widths.iter().sum();

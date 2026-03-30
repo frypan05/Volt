@@ -117,9 +117,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .split(main[1]);
 
-    draw_explorer(frame, app, cols[0], theme);
-    draw_editor(frame, app, cols[1], theme);
-    draw_viewer(frame, app, cols[2], theme);
+    let res_01 = app.resize_target == crate::app::ResizeTarget::Split01;
+    let res_12 = app.resize_target == crate::app::ResizeTarget::Split12;
+
+    draw_explorer(frame, app, cols[0], theme, res_01);
+    draw_editor(frame, app, cols[1], theme, res_01, res_12);
+    draw_viewer(frame, app, cols[2], theme, res_12);
 
     // Overlays — drawn last so they sit on top of everything.
     if app.url_history_open && app.url_history.len() > 1 {
@@ -205,8 +208,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 // Explorer
 // ---------------------------------------------------------------------------
 
-fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
-    let block = pane_block(" 1. EXPLORER ", app.focus == FocusPane::Explorer, theme);
+fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_right: bool) {
+    let block = pane_block(" 1. EXPLORER ", app.focus == FocusPane::Explorer, theme, false, res_right);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -261,8 +264,8 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 // Editor
 // ---------------------------------------------------------------------------
 
-fn draw_editor(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
-    let block = pane_block(" 2. EDITOR ", app.focus == FocusPane::Editor, theme);
+fn draw_editor(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_left: bool, res_right: bool) {
+    let block = pane_block(" 2. EDITOR ", app.focus == FocusPane::Editor, theme, res_left, res_right);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 4 {
@@ -310,7 +313,7 @@ fn draw_base_url(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
             " Base URL [u] "
         })
         .border_style(if editing {
-            Style::default().fg(theme.yellow)
+            Style::default().fg(theme.teal)
         } else {
             Style::default().fg(theme.comment)
         });
@@ -495,7 +498,7 @@ fn draw_body_editor(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     }
 
     let bc = if editing {
-        theme.yellow
+        theme.teal
     } else if app.body_type_focused {
         theme.teal
     } else {
@@ -586,8 +589,8 @@ fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect, theme: Them
 // Viewer / Response pane
 // ---------------------------------------------------------------------------
 
-fn draw_viewer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
-    let block = pane_block(" 3. RESPONSE ", app.focus == FocusPane::Viewer, theme);
+fn draw_viewer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_left: bool) {
+    let block = pane_block(" 3. RESPONSE ", app.focus == FocusPane::Viewer, theme, res_left, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 3 {
@@ -902,7 +905,7 @@ fn draw_url_history_dropdown(frame: &mut Frame, app: &App, editor_area: Rect, th
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.yellow))
+        .border_style(Style::default().fg(theme.teal))
         .title(" URL History (↑/↓) ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1177,8 +1180,10 @@ fn render_multiline_with_cursor(buf: &crate::app::TextBuffer) -> Vec<Line<'stati
         .collect()
 }
 
-fn pane_block(title: &str, focused: bool, theme: Theme) -> Block<'_> {
-    let (color, bt) = if focused {
+fn pane_block(title: &str, focused: bool, theme: Theme, res_left: bool, res_right: bool) -> Block<'_> {
+    let (color, bt) = if res_left || res_right {
+        (theme.teal, BorderType::Thick)
+    } else if focused {
         (theme.teal, BorderType::Thick)
     } else {
         (theme.comment, BorderType::Plain)

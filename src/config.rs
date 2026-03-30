@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use directories::ProjectDirs;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RouteConfig {
@@ -13,9 +14,51 @@ pub struct RouteConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalConfig {
+    pub theme: String,
+}
+
+impl Default for GlobalConfig {
+    fn default() -> Self {
+        Self {
+            theme: "vesper".to_string(),
+        }
+    }
+}
+
+impl GlobalConfig {
+    pub fn load() -> Self {
+        let path = Self::path();
+        if !path.exists() {
+            return Self::default();
+        }
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        toml::from_str(&content).unwrap_or_default()
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = Self::path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self)?;
+        fs::write(path, content)?;
+        Ok(())
+    }
+
+    fn path() -> PathBuf {
+        if let Some(proj_dirs) = ProjectDirs::from("com", "volt", "volt") {
+            proj_dirs.config_dir().join("config.toml")
+        } else {
+            // Fallback for systems without a home/config directory
+            PathBuf::from(".volt_global.toml")
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub base_url: String,
-    pub theme: String,
     pub last_selected_route: Option<String>,
     pub drafts: HashMap<String, RouteConfig>,
 }
@@ -24,7 +67,6 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             base_url: "http://localhost:3000".to_string(),
-            theme: "vesper".to_string(),
             last_selected_route: None,
             drafts: HashMap::new(),
         }
@@ -39,12 +81,6 @@ impl AppConfig {
         }
         let content = fs::read_to_string(&path)?;
         Ok(toml::from_str(&content).unwrap_or_else(|_| Self::default()))
-    }
-
-    pub fn save(&self) -> anyhow::Result<()> {
-        let content = toml::to_string_pretty(self)?;
-        fs::write(Self::path(), content)?;
-        Ok(())
     }
 
     fn path() -> PathBuf {

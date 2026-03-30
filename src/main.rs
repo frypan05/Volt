@@ -47,7 +47,8 @@ async fn main() -> anyhow::Result<()> {
         return handle_update().await;
     }
 
-    let mut config = config::AppConfig::load()?;
+    let config = config::AppConfig::load()?;
+    let mut global_config = config::GlobalConfig::load();
 
     if cli.themes {
         let options = vec!["vesper", "dracula", "gruvbox", "tokyo-night"];
@@ -55,9 +56,9 @@ async fn main() -> anyhow::Result<()> {
 
         match ans {
             Ok(choice) => {
-                config.theme = choice.to_string();
-                config.save()?;
-                println!("Theme set to {}", config.theme);
+                global_config.theme = choice.to_string();
+                global_config.save()?;
+                println!("Theme set to {}", global_config.theme);
                 return Ok(());
             }
             Err(_) => return Ok(()),
@@ -65,9 +66,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(theme) = cli.theme {
-        config.theme = theme;
-        config.save()?;
-        println!("Theme set to {}", config.theme);
+        global_config.theme = theme;
+        global_config.save()?;
+        println!("Theme set to {}", global_config.theme);
         return Ok(());
     }
 
@@ -82,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppMsg>();
-    let mut app = App::new(routes, config, tx);
+    let mut app = App::new(routes, config, global_config, tx);
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -125,7 +126,12 @@ async fn main() -> anyhow::Result<()> {
                 Event::Mouse(m)
                     if m.kind == MouseEventKind::Drag(crossterm::event::MouseButton::Left) =>
                 {
-                    app.resize_panes(m.column);
+                    app.handle_mouse_drag(m.column);
+                }
+                Event::Mouse(m)
+                    if m.kind == MouseEventKind::Up(crossterm::event::MouseButton::Left) =>
+                {
+                    app.handle_mouse_release();
                 }
                 Event::Mouse(m) if m.kind == MouseEventKind::ScrollUp => {
                     app.handle_mouse_scroll(m.column, m.row, true);
