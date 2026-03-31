@@ -9,6 +9,7 @@ use ratatui::widgets::{
     ScrollbarState, Tabs, Wrap,
 };
 
+use crate::VERSION;
 use crate::app::{App, BodyType, CustomRouteField, EditorTab, FocusPane, HttpMethod, InputTarget};
 use crate::ui::highlight::ResponseView;
 
@@ -32,7 +33,7 @@ impl Theme {
     pub fn get(name: &str) -> Self {
         match name.to_lowercase().as_str() {
             "dracula" => Self {
-                primary: Color::Rgb(0x8b, 0xe9, 0xfd), // Teal/Cyan
+                primary: Color::Rgb(0x8b, 0xe9, 0xfd),
                 fg: Color::Rgb(0xf8, 0xf8, 0xf2),
                 comment: Color::Rgb(0x62, 0x72, 0xa4),
                 orange: Color::Rgb(0xff, 0xb8, 0x6c),
@@ -42,7 +43,7 @@ impl Theme {
                 pink: Color::Rgb(0xff, 0x79, 0xc6),
             },
             "gruvbox" => Self {
-                primary: Color::Rgb(0x8e, 0xc0, 0x7c), // Aqua/Teal
+                primary: Color::Rgb(0x8e, 0xc0, 0x7c),
                 fg: Color::Rgb(0xeb, 0xdb, 0xb2),
                 comment: Color::Rgb(0x92, 0x83, 0x74),
                 orange: Color::Rgb(0xfe, 0x80, 0x19),
@@ -52,7 +53,7 @@ impl Theme {
                 pink: Color::Rgb(0xd3, 0x86, 0x9b),
             },
             "tokyo-night" => Self {
-                primary: Color::Rgb(0x73, 0xdc, 0xad), // Teal
+                primary: Color::Rgb(0x73, 0xdc, 0xad),
                 fg: Color::Rgb(0xa9, 0xb1, 0xd6),
                 comment: Color::Rgb(0x56, 0x5f, 0x89),
                 orange: Color::Rgb(0xff, 0x9e, 0x64),
@@ -63,7 +64,7 @@ impl Theme {
             },
             _ => Self {
                 // Vesper (Default)
-                primary: Color::Rgb(0x5c, 0xb8, 0xb2), // Teal
+                primary: Color::Rgb(0x5c, 0xb8, 0xb2),
                 fg: Color::Rgb(0xcc, 0xc9, 0xc2),
                 comment: Color::Rgb(0x4d, 0x4d, 0x4d),
                 orange: Color::Rgb(0xff, 0x98, 0x57),
@@ -124,7 +125,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_editor(frame, app, cols[1], theme, res_01, res_12);
     draw_viewer(frame, app, cols[2], theme, res_12);
 
-    // Overlays — drawn last so they sit on top of everything.
     if app.url_history_open && app.url_history.len() > 1 {
         draw_url_history_dropdown(frame, app, cols[1], theme);
     }
@@ -134,7 +134,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.pending_request {
         draw_loader(frame, app, cols[2], theme);
     }
-    // View picker popup — highest overlay priority.
     if app.view_picker_open {
         draw_view_picker_popup(frame, app, theme);
     }
@@ -169,9 +168,30 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+    // Right-side content: "Donate  v{VERSION}"
+    // Compute width: leading space + "Donate" + double-space + "v" + version + trailing space
+    let version_str = format!(" Donate  v{} ", VERSION);
+    let right_w = version_str.len() as u16;
+
+    // Split the footer row: left gets keybindings, right gets donate+version.
+    // Guard against terminals so narrow the right panel would not fit.
+    let (left_area, right_area) = if area.width > right_w + 20 {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(right_w)])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
+
+    // Left: existing keybindings (unchanged)
     let key = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
     let extra = if app.body_type_focused {
-        Span::styled("  ←/→ body type  Esc/← back", Style::default().fg(theme.yellow))
+        Span::styled(
+            "  ←/→ body type  Esc/← back",
+            Style::default().fg(theme.yellow),
+        )
     } else if app.view_picker_open {
         Span::styled(
             "  j/k select  Enter confirm  Esc cancel  1-5 quick pick",
@@ -180,7 +200,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     } else {
         Span::raw("")
     };
-    let text = Line::from(vec![
+    let left_text = Line::from(vec![
         Span::styled(" q ", key),
         Span::raw("quit "),
         Span::styled(" tab ", key),
@@ -201,7 +221,30 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
         Span::raw(&app.status_message),
         extra,
     ]);
-    frame.render_widget(Paragraph::new(text).bg(Color::Indexed(234)), area);
+    frame.render_widget(Paragraph::new(left_text).bg(Color::Indexed(234)), left_area);
+
+    // Right: Donate  vX.Y.Z — styled to match the UI palette
+    if let Some(r) = right_area {
+        let right_line = Line::from(vec![
+            Span::raw(" "),
+            // Span::styled(
+            //     "Donate",
+            //     Style::default()
+            //         .fg(theme.teal)
+            //         .add_modifier(Modifier::BOLD)
+            //         .add_modifier(Modifier::UNDERLINED),
+            // ),
+            Span::styled("  ", Style::default().fg(theme.comment)),
+            Span::styled(format!("v{}", VERSION), Style::default().fg(theme.comment)),
+            Span::raw(" "),
+        ]);
+        frame.render_widget(
+            Paragraph::new(right_line)
+                .bg(Color::Indexed(234))
+                .alignment(Alignment::Right),
+            r,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +252,13 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 // ---------------------------------------------------------------------------
 
 fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_right: bool) {
-    let block = pane_block(" 1. EXPLORER ", app.focus == FocusPane::Explorer, theme, false, res_right);
+    let block = pane_block(
+        " 1. EXPLORER ",
+        app.focus == FocusPane::Explorer,
+        theme,
+        false,
+        res_right,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -231,13 +280,23 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_rig
         })
         .collect();
 
-    // Empty state hint — shown as a dimmed item when no routes exist
     if app.filtered_routes.is_empty() {
         if app.is_too_broad {
             items.push(ListItem::new(vec![
-                Line::from(Span::styled(" Too broad directory!", Style::default().fg(theme.orange).add_modifier(Modifier::BOLD))),
-                Line::from(Span::styled(" Please open a project", Style::default().fg(theme.yellow))),
-                Line::from(Span::styled(" directory for scanning.", Style::default().fg(theme.yellow))),
+                Line::from(Span::styled(
+                    " Too broad directory!",
+                    Style::default()
+                        .fg(theme.orange)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    " Please open a project",
+                    Style::default().fg(theme.yellow),
+                )),
+                Line::from(Span::styled(
+                    " directory for scanning.",
+                    Style::default().fg(theme.yellow),
+                )),
             ]));
         } else {
             items.push(ListItem::new(Span::styled(
@@ -264,8 +323,21 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_rig
 // Editor
 // ---------------------------------------------------------------------------
 
-fn draw_editor(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_left: bool, res_right: bool) {
-    let block = pane_block(" 2. EDITOR ", app.focus == FocusPane::Editor, theme, res_left, res_right);
+fn draw_editor(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    theme: Theme,
+    res_left: bool,
+    res_right: bool,
+) {
+    let block = pane_block(
+        " 2. EDITOR ",
+        app.focus == FocusPane::Editor,
+        theme,
+        res_left,
+        res_right,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 4 {
@@ -341,7 +413,11 @@ fn draw_editor_tabs(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
             .position(|t| *t == app.editor_tab)
             .unwrap_or(0),
     )
-    .highlight_style(Style::default().fg(theme.primary).add_modifier(Modifier::BOLD))
+    .highlight_style(
+        Style::default()
+            .fg(theme.primary)
+            .add_modifier(Modifier::BOLD),
+    )
     .divider("|");
     frame.render_widget(tabs, area);
 }
@@ -365,7 +441,6 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
         Constraint::Percentage(47),
     ];
 
-    // Header row
     let hdr = Rect::new(area.x, area.y, area.width, 1);
     let hcols = Layout::default()
         .direction(Direction::Horizontal)
@@ -453,7 +528,10 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
             let (t, s) = if row.value.text.is_empty() {
                 (" value".into(), Style::default().fg(theme.comment))
             } else {
-                (format!(" {}", row.value.text), Style::default().fg(theme.fg))
+                (
+                    format!(" {}", row.value.text),
+                    Style::default().fg(theme.fg),
+                )
             };
             frame.render_widget(Paragraph::new(Span::styled(t, s)), cells[2]);
         }
@@ -554,7 +632,6 @@ fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect, theme: Them
     let mut spans: Vec<Span> = vec![Span::styled(" Type: ", Style::default().fg(theme.comment))];
     for btype in &BodyType::ALL {
         let sel = draft.body_type == *btype;
-        // Highlight selected; if in sub-mode also highlight the whole row with a border tint.
         let style = if sel && app.body_type_focused {
             Style::default()
                 .fg(Color::Black)
@@ -590,7 +667,13 @@ fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect, theme: Them
 // ---------------------------------------------------------------------------
 
 fn draw_viewer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_left: bool) {
-    let block = pane_block(" 3. RESPONSE ", app.focus == FocusPane::Viewer, theme, res_left, false);
+    let block = pane_block(
+        " 3. RESPONSE ",
+        app.focus == FocusPane::Viewer,
+        theme,
+        res_left,
+        false,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 3 {
@@ -717,7 +800,6 @@ fn draw_viewer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_left:
     }
 }
 
-/// Compact one-line view-mode bar shown under the metrics block.
 fn draw_response_view_bar(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     let mut spans: Vec<Span> = vec![Span::styled(" View: ", Style::default().fg(theme.comment))];
     for v in &ResponseView::ALL {
@@ -733,7 +815,10 @@ fn draw_response_view_bar(frame: &mut Frame, app: &App, area: Rect, theme: Theme
         spans.push(Span::styled(format!(" {} ", v.label()), style));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::styled(" / to change", Style::default().fg(theme.comment)));
+    spans.push(Span::styled(
+        " / to change",
+        Style::default().fg(theme.comment),
+    ));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -744,12 +829,9 @@ fn draw_response_view_bar(frame: &mut Frame, app: &App, area: Rect, theme: Theme
 fn draw_view_picker_popup(frame: &mut Frame, app: &App, theme: Theme) {
     let frame_area = frame.area();
 
-    // Size: wide enough to hold all labels + descriptions, short enough to be unobtrusive.
     let popup_w: u16 = 38;
-    // 2 border + 1 title gap + 1 per option + 1 hint = 5 rows minimum
     let popup_h: u16 = (ResponseView::ALL.len() as u16) + 4;
 
-    // Centre the popup over the response pane (right 40% of content area).
     let x = (frame_area.width.saturating_sub(popup_w)) / 2;
     let y = (frame_area.height.saturating_sub(popup_h)) / 2;
     let popup_area = Rect::new(
@@ -776,7 +858,6 @@ fn draw_view_picker_popup(frame: &mut Frame, app: &App, theme: Theme) {
         return;
     }
 
-    // One row per view option
     let option_h = ResponseView::ALL.len() as u16;
     let hint_h = inner.height.saturating_sub(option_h);
 
@@ -785,7 +866,6 @@ fn draw_view_picker_popup(frame: &mut Frame, app: &App, theme: Theme) {
         .constraints([Constraint::Length(option_h), Constraint::Min(hint_h)])
         .split(inner);
 
-    // Descriptions shown next to each option
     let descriptions: [&str; 5] = [
         "detect from Content-Type",
         "pretty-print JSON",
@@ -820,7 +900,6 @@ fn draw_view_picker_popup(frame: &mut Frame, app: &App, theme: Theme) {
 
     let list = List::new(items).highlight_style(Style::default().bg(Color::Indexed(237)));
 
-    // Use a ListState so the currently selected item appears highlighted.
     let mut state = ratatui::widgets::ListState::default();
     let cur_idx = ResponseView::ALL
         .iter()
@@ -830,7 +909,6 @@ fn draw_view_picker_popup(frame: &mut Frame, app: &App, theme: Theme) {
 
     frame.render_stateful_widget(list, chunks[0], &mut state);
 
-    // Hint row at the bottom of the popup
     if hint_h > 0 {
         let key = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
         frame.render_widget(
@@ -1019,7 +1097,11 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App, theme: Theme) {
         for (i, m) in HttpMethod::ALL.iter().enumerate() {
             let is_sel = *m == d.method;
             let (bg, fg, mo) = if is_sel {
-                (method_pill_color(m.as_str(), theme), Color::Black, Modifier::BOLD)
+                (
+                    method_pill_color(m.as_str(), theme),
+                    Color::Black,
+                    Modifier::BOLD,
+                )
             } else {
                 (Color::Indexed(236), theme.comment, Modifier::empty())
             };
@@ -1180,7 +1262,13 @@ fn render_multiline_with_cursor(buf: &crate::app::TextBuffer) -> Vec<Line<'stati
         .collect()
 }
 
-fn pane_block(title: &str, focused: bool, theme: Theme, res_left: bool, res_right: bool) -> Block<'_> {
+fn pane_block(
+    title: &str,
+    focused: bool,
+    theme: Theme,
+    res_left: bool,
+    res_right: bool,
+) -> Block<'_> {
     let (color, bt) = if res_left || res_right {
         (theme.teal, BorderType::Thick)
     } else if focused {

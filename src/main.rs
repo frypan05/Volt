@@ -9,12 +9,14 @@ use std::time::Duration;
 
 use crate::ui::highlight::ResponseView;
 use app::{App, AppMsg, BodyType, CustomRouteField, EditorTab, FocusPane, InputTarget};
+use clap::Parser;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     MouseEventKind,
 };
 use tokio::sync::mpsc;
-use clap::Parser;
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
 #[command(name = "volt")]
@@ -28,6 +30,10 @@ struct Cli {
     /// Set the theme
     #[arg(long)]
     theme: Option<String>,
+
+    /// Update volt to the latest version from GitHub
+    #[arg(long = "update", short = 'U')]
+    update_flag: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -43,7 +49,8 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if let Some(Commands::Update) = cli.command {
+    // Both `volt update` (subcommand) and `volt --update` / `volt -U` (flag) trigger the updater.
+    if matches!(cli.command, Some(Commands::Update)) || cli.update_flag {
         return handle_update().await;
     }
 
@@ -118,6 +125,28 @@ async fn main() -> anyhow::Result<()> {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     handle_key(&mut app, key).await;
                 }
+                // // Ctrl+Left Click — check if the user clicked the Donate button.
+                // Event::Mouse(m)
+                //     if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                //         && m.modifiers
+                //             .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                // {
+                //     let area = app.last_area;
+                //     let footer_row = area.height.saturating_sub(1);
+                //     if m.row == footer_row {
+                //         let version_str = format!(" Donate  v{} ", VERSION);
+                //         let right_w = version_str.len() as u16;
+                //         if area.width > right_w + 20 {
+                //             let donate_start = area.width.saturating_sub(right_w);
+                //             if m.column >= donate_start && m.column < donate_start + right_w {
+                //                 open_url("https://ko-fi.com/dakshsharma05");
+                //                 app.status_message = "Opening Ko-fi in your browser…".to_string();
+                //             }
+                //         }
+                //     }
+                //     // Still deliver the click for regular pane focus / resize.
+                //     app.handle_mouse_click(m.column, m.row);
+                // }
                 Event::Mouse(m)
                     if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) =>
                 {
@@ -154,7 +183,28 @@ async fn main() -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Key handler
+// URL opener (cross-platform)
+// ---------------------------------------------------------------------------
+
+// fn open_url(url: &str) {
+//     #[cfg(target_os = "windows")]
+//     {
+//         let _ = std::process::Command::new("cmd")
+//             .args(["/c", "start", "", url])
+//             .spawn();
+//     }
+//     #[cfg(target_os = "macos")]
+//     {
+//         let _ = std::process::Command::new("open").arg(url).spawn();
+//     }
+//     #[cfg(target_os = "linux")]
+//     {
+//         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+//     }
+// }
+
+// ---------------------------------------------------------------------------
+// Updater
 // ---------------------------------------------------------------------------
 
 async fn handle_update() -> anyhow::Result<()> {
@@ -175,20 +225,25 @@ async fn handle_update() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Could not find latest version tag"))?
         .trim_start_matches('v');
 
-    let current_version = env!("CARGO_PKG_VERSION");
+    let current_version = VERSION;
 
     if latest_tag == current_version {
-        println!("You are already on the latest version (v{}).", current_version);
+        println!(
+            "You are already on the latest version (v{}).",
+            current_version
+        );
         return Ok(());
     }
 
-    println!("New version available: v{} (current: v{})", latest_tag, current_version);
+    println!(
+        "New version available: v{} (current: v{})",
+        latest_tag, current_version
+    );
 
     let assets = release["assets"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("No assets found in latest release"))?;
 
-    // Determine target asset name based on OS
     let target_os = std::env::consts::OS;
     let asset_name = match target_os {
         "windows" => "volt-windows.exe",
@@ -200,7 +255,9 @@ async fn handle_update() -> anyhow::Result<()> {
     let asset = assets
         .iter()
         .find(|a| a["name"].as_str() == Some(asset_name))
-        .ok_or_else(|| anyhow::anyhow!("Could not find binary for {} in latest release", target_os))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("Could not find binary for {} in latest release", target_os)
+        })?;
 
     let download_url = asset["browser_download_url"]
         .as_str()
@@ -214,8 +271,6 @@ async fn handle_update() -> anyhow::Result<()> {
 
     std::fs::write(&tmp_exe, bytes)?;
 
-    // On Windows, we can't replace a running binary directly.
-    // We rename the current one and move the new one in.
     #[cfg(windows)]
     {
         let old_exe = current_exe.with_extension("old");
@@ -230,7 +285,6 @@ async fn handle_update() -> anyhow::Result<()> {
     #[cfg(not(windows))]
     {
         std::fs::rename(&tmp_exe, &current_exe)?;
-        // Ensure it's executable
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -244,23 +298,24 @@ async fn handle_update() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Key handler
+// ---------------------------------------------------------------------------
+
 async fn handle_key(app: &mut App, key: KeyEvent) {
     // -----------------------------------------------------------------------
     // View picker popup — highest priority overlay, handles its own keys.
-    // Opened with '/' from anywhere, closed with Esc or a selection.
     // -----------------------------------------------------------------------
     if app.view_picker_open {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 app.view_picker_open = false;
             }
-            // Number shortcuts 1-5
             KeyCode::Char('1') => app.select_view(ResponseView::Auto),
             KeyCode::Char('2') => app.select_view(ResponseView::Json),
             KeyCode::Char('3') => app.select_view(ResponseView::Html),
             KeyCode::Char('4') => app.select_view(ResponseView::Text),
             KeyCode::Char('5') => app.select_view(ResponseView::Raw),
-            // j/k or arrow keys move selection, Enter confirms
             KeyCode::Char('k') | KeyCode::Down => {
                 app.response.view = app.response.view.next();
             }
@@ -268,7 +323,6 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                 app.response.view = app.response.view.prev();
             }
             KeyCode::Enter => {
-                // Confirm current selection and close
                 let view = app.response.view;
                 app.select_view(view);
             }
@@ -277,15 +331,13 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Dialog takes full priority over editor modes.
     if app.custom_route_dialog.is_some() {
         handle_dialog_key(app, key);
         return;
     }
 
     // -----------------------------------------------------------------------
-    // Text / KV editing mode — must be checked BEFORE any shortcut that uses
-    // characters like '/' so that typing into URL/path fields is never stolen.
+    // Text / KV editing mode
     // -----------------------------------------------------------------------
     if app.input_mode {
         match key.code {
@@ -391,18 +443,11 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
     }
 
     // -----------------------------------------------------------------------
-    // Body-type selector sub-mode (None / JSON / Text / Form row).
-    //
-    // FIX: Esc now navigates back to the Auth tab (the tab immediately
-    // before Body), not just clears a flag and leaves the user stranded.
-    // The user can also press ← when already at the leftmost type (None)
-    // to exit back to Auth, mirroring how ← on Params wraps to Body.
+    // Body-type selector sub-mode
     // -----------------------------------------------------------------------
     if app.body_type_focused {
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => {
-                // If we are already on None (leftmost), exit the sub-mode
-                // back to the Auth tab — feels like continuing to move left.
                 if app.current_draft().body_type == BodyType::None {
                     app.body_type_focused = false;
                     app.editor_tab = EditorTab::Auth;
@@ -442,7 +487,6 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => app.focus_next(),
         KeyCode::BackTab => app.focus_prev(),
 
-        // Explorer
         KeyCode::Char('k') | KeyCode::Down if app.focus == FocusPane::Explorer => {
             app.move_explorer_selection(true);
         }
@@ -450,12 +494,10 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
             app.move_explorer_selection(false);
         }
 
-        // Delete selected custom route — only active in Explorer pane.
         KeyCode::Char('d') if app.focus == FocusPane::Explorer => {
             app.delete_selected_custom_route();
         }
 
-        // Viewer scroll
         KeyCode::Char('k') | KeyCode::Down if app.focus == FocusPane::Viewer => {
             app.scroll_viewer(false)
         }
@@ -474,7 +516,6 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('[') if app.focus == FocusPane::Viewer => app.cycle_response_view(false),
         KeyCode::Char(']') if app.focus == FocusPane::Viewer => app.cycle_response_view(true),
 
-        // Copy response body to clipboard — 'y' (yank) while Viewer is focused.
         KeyCode::Char('y') if app.focus == FocusPane::Viewer => {
             if app.copy_response_to_clipboard() {
                 app.status_message = "Copied response to clipboard".to_string();
@@ -489,7 +530,6 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         // selector highlighted, then uses ← / → to change.
         KeyCode::Char('h') | KeyCode::Left if app.focus == FocusPane::Editor => {
             if app.editor_tab == EditorTab::Body {
-                // Enter body-type selector without changing the value yet.
                 app.body_type_focused = true;
             } else {
                 app.editor_tab = app.editor_tab.prev();
@@ -510,7 +550,6 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                 if app.current_draft().body_type != BodyType::None {
                     app.start_editing(InputTarget::Tab(EditorTab::Body));
                 } else {
-                    // No type chosen yet — drop into selector so user picks one first.
                     app.body_type_focused = true;
                 }
             } else {
