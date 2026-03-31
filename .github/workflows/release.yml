@@ -110,11 +110,28 @@ jobs:
           VERSION=${{ github.ref_name }}
           VERSION=${VERSION#v}
           cd homebrew-volt
+          # update version
           sed -i "s/version \".*\"/version \"$VERSION\"/" Formula/volt.rb
-          sed -i "0,/sha256 \".*\"/{s/sha256 \".*\"/sha256 \"$SHA_MAC_INTEL\"/}" Formula/volt.rb
-          sed -i "0,/sha256 \".*\"/{/sha256 \"$SHA_MAC_INTEL\"/! s/sha256 \".*\"/sha256 \"$SHA_MAC_ARM\"/}" Formula/volt.rb
-          sed -i "0,/sha256 \".*\"/{/sha256 \"$SHA_MAC_ARM\"/! s/sha256 \".*\"/sha256 \"$SHA_LINUX_INTEL\"/}" Formula/volt.rb
-          sed -i "0,/sha256 \".*\"/{/sha256 \"$SHA_LINUX_INTEL\"/! s/sha256 \".*\"/sha256 \"$SHA_LINUX_ARM\"/}" Formula/volt.rb
+
+          # mac intel
+          sed -i "/on_macos/,/on_arm/ {
+          /on_intel/,/sha256/ s/sha256 \".*\"/sha256 \"$SHA_MAC_INTEL\"/
+          }" Formula/volt.rb
+
+          # mac arm
+          sed -i "/on_macos/,/end/ {
+          /on_arm/,/sha256/ s/sha256 \".*\"/sha256 \"$SHA_MAC_ARM\"/
+          }" Formula/volt.rb
+
+          # linux intel
+          sed -i "/on_linux/,/on_arm/ {
+          /on_intel/,/sha256/ s/sha256 \".*\"/sha256 \"$SHA_LINUX_INTEL\"/
+          }" Formula/volt.rb
+
+          # linux arm
+          sed -i "/on_linux/,/end/ {
+          /on_arm/,/sha256/ s/sha256 \".*\"/sha256 \"$SHA_LINUX_ARM\"/
+          }" Formula/volt.rb
 
       - name: Push
         run: |
