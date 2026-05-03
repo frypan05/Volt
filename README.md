@@ -1,11 +1,13 @@
 # volt
 
+![Release](https://img.shields.io/github/v/release/frypan05/Volt)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-blue)
+
 volt is a terminal-native API client inspired by `lazygit` and `lazydocker`. Run it inside any project directory and it automatically discovers your routes, lets you edit and fire requests, and renders the response — all without leaving the terminal.
 
 <https://github.com/user-attachments/assets/444c725f-4e14-4de6-ae8a-56db1ec275c5>
 
-![Release](https://img.shields.io/github/v/release/frypan05/Volt)
-![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-blue)
+
 
 ---
 <img width="1919" height="1079" alt="zed-editor" src="https://github.com/user-attachments/assets/75ef8697-94c9-4389-aff1-06eb83eeb645" />
