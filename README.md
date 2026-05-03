@@ -12,6 +12,16 @@ volt is a terminal-native API client inspired by `lazygit` and `lazydocker`. Run
 
 <img width="1233" height="466" alt="zed" src="https://github.com/user-attachments/assets/9afd990d-d78e-4e94-9a20-4215414df264" />
 
+<div align="center">
+  <a href="https://star-history.com/#frypan05/Volt&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=frypan05/Volt&type=Date&theme=dark">
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=frypan05/Volt&type=Date">
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=frypan05/Volt&type=Date" width="700">
+    </picture>
+  </a>
+</div>
+
 ## Features
 
 **Route discovery**
