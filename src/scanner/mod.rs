@@ -1292,6 +1292,14 @@ fn extract_aspnet(path: &Path, content: &str) -> Vec<RouteInfo> {
     routes
 }
 
+/// HTTP-triggered Azure Functions (.NET / C#)
+///
+/// Patterns detected (attribute routing):
+///   [HttpTrigger(AuthorizationLevel.*, "get", "post", Route = "path")]
+///   [HttpTrigger(AuthorizationLevel.*, Route = "path")]
+///   [HttpTrigger("get", "post", Route = "path")]
+///
+/// Gate: .cs file containing HttpTrigger attributes.
 fn extract_azurefunction(path: &Path, content: &str) -> Vec<RouteInfo> {
     if path.extension().and_then(|e| e.to_str()) != Some("cs") {
         return Vec::new();
@@ -1311,6 +1319,9 @@ r#"\[HttpTrigger\(AuthorizationLevel\.(\w+)(?:\s*,\s*"(\w+)")?(?:\s*,\s*Route\s*
         let _auth_level = cap.get(1).map(|m| m.as_str()).unwrap_or("");
         let method = cap.get(2).map(|m| m.as_str()).unwrap_or("get");
         let route = cap.get(3).map(|m| m.as_str()).unwrap_or("");
+        if route == "" {
+            continue;
+        }
 
         if let Ok(method) = HttpMethod::try_from(method) {
             routes.push(RouteInfo {
