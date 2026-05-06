@@ -1,3 +1,4 @@
+use core::iter::{IntoIterator, Iterator};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1292,14 +1293,23 @@ fn extract_aspnet(path: &Path, content: &str) -> Vec<RouteInfo> {
     routes
 }
 
-/// HTTP-triggered Azure Functions (.NET / C#)
+/// Azure Functions (.NET / C#) — HTTP-triggered functions.
 ///
-/// Patterns detected (attribute routing):
-///   [HttpTrigger(AuthorizationLevel.*, "get", "post", Route = "path")]
-///   [HttpTrigger(AuthorizationLevel.*, Route = "path")]
-///   [HttpTrigger("get", "post", Route = "path")]
+/// Patterns detected:
+///   [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", Route = "users")]
+///   [HttpTrigger(AuthorizationLevel.Function, Route = "orders")]
+///   [HttpTrigger(AuthorizationLevel.Anonymous)]  (no Route — falls back to function name)
 ///
-/// Gate: .cs file containing HttpTrigger attributes.
+/// Route resolution:
+///   If `Route = "..."` is present, uses that as the path segment.
+///   Otherwise, looks backwards for `[Function("Name")]` and uses the name.
+///   All routes are prefixed with `/api/`.
+///
+/// Method resolution:
+///   Explicit methods in the attribute (e.g. `"get", "post"`) are used.
+///   If none are specified, defaults to GET.
+///
+/// Gate: .cs file containing `[HttpTrigger(` attribute.
 fn extract_azurefunction(path: &Path, content: &str) -> Vec<RouteInfo> {
     if path.extension().and_then(|e| e.to_str()) != Some("cs") {
         return Vec::new();
@@ -1309,49 +1319,46 @@ fn extract_azurefunction(path: &Path, content: &str) -> Vec<RouteInfo> {
         return Vec::new();
     }
 
-    let mut routes = Vec::new();
+    let attr_functions = Regex::new(r#"\[Function\("([^"]+)"\)\]"#).unwrap();
 
-    let attr_default = Regex::new(
-r#"\[HttpTrigger\(AuthorizationLevel\.(\w+)(?:\s*,\s*"(\w+)")?(?:\s*,\s*Route\s*=\s*"([^"]*)")?\s*\)\]"#    )
-    .unwrap();
-    for cap in attr_default.captures_iter(content) {
-        let offset = cap.get(0).unwrap().start();
-        let _auth_level = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-        let method = cap.get(2).map(|m| m.as_str()).unwrap_or("get");
-        let route = cap.get(3).map(|m| m.as_str()).unwrap_or("");
-        if route == "" {
-            continue;
-        }
-
-        if let Ok(method) = HttpMethod::try_from(method) {
-            routes.push(RouteInfo {
-                method,
-                path: format!("/{}", route),
-                framework: "azurefunction".to_string(),
-                source: path.to_path_buf(),
-                line: line_number(content, offset),
-            });
-        }
-    }
-
-    let attr_with_methods = Regex::new(
-        r#"\[HttpTrigger\(AuthorizationLevel\.(\w+)\s*,\s*((?:"[^"]+"\s*,?\s*)+)(?:,?\s*Route\s*=\s*"([^"]*)")?\s*\)\]"#,
+    let trigger_re = Regex::new(
+        r#"\[HttpTrigger\(AuthorizationLevel\.(\w+)(?:\s*,\s*((?:"[^"]+"\s*,?\s*)+))?(?:,?\s*Route\s*=\s*"([^"]*)")?\s*\)\]"#,
     )
     .unwrap();
     let method_re = Regex::new(r#""([^"]+)""#).unwrap();
 
-    for cap in attr_with_methods.captures_iter(content) {
+    let mut routes = Vec::new();
+
+    for cap in trigger_re.captures_iter(content) {
         let offset = cap.get(0).unwrap().start();
-        let _auth_level = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-        let methods_blob = cap.get(2).unwrap().as_str();
+        let methods_blob = cap.get(2).map(|m| m.as_str());
         let route = cap.get(3).map(|m| m.as_str()).unwrap_or("");
 
-        for mc in method_re.captures_iter(methods_blob) {
-            let method_str = mc.get(1).unwrap().as_str();
+        let route = if route.is_empty() {
+            let look_start = offset.saturating_sub(500);
+            let window = &content[look_start..offset];
+            if let Some(fc) = attr_functions.captures_iter(window).last() {
+                fc.get(1).unwrap().as_str().to_string()
+            } else {
+                continue;
+            }
+        } else {
+            route.to_string()
+        };
+
+        let methods: Vec<&str> = match methods_blob {
+            Some(blob) => method_re
+                .captures_iter(blob)
+                .map(|mc| mc.get(1).unwrap().as_str())
+                .collect(),
+            None => vec!["get"],
+        };
+
+        for method_str in methods {
             if let Ok(method) = HttpMethod::try_from(method_str) {
                 routes.push(RouteInfo {
                     method,
-                    path: format!("/{}", route),
+                    path: format!("/api/{}", route),
                     framework: "azurefunction".to_string(),
                     source: path.to_path_buf(),
                     line: line_number(content, offset),
@@ -1359,9 +1366,6 @@ r#"\[HttpTrigger\(AuthorizationLevel\.(\w+)(?:\s*,\s*"(\w+)")?(?:\s*,\s*Route\s*
             }
         }
     }
-
-    // Helper — extract individual method strings from captured methods_blob
-    let _method_re = Regex::new(r#""([^"]+)""#).unwrap();
 
     routes
 }
