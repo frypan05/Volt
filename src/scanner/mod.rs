@@ -185,6 +185,7 @@ fn extract_routes(path: &Path, content: &str) -> Vec<RouteInfo> {
     routes.extend(extract_flask(path, content));
     routes.extend(extract_nuxt(path, content));
     routes.extend(extract_aspnet(path, content));
+    routes.extend(extract_azurefunction(path, content));
     routes
 }
 
@@ -1287,6 +1288,69 @@ fn extract_aspnet(path: &Path, content: &str) -> Vec<RouteInfo> {
             r.path = param_re.replace_all(&r.path, ":$1").to_string();
         }
     }
+
+    routes
+}
+
+fn extract_azurefunction(path: &Path, content: &str) -> Vec<RouteInfo> {
+    if path.extension().and_then(|e| e.to_str()) != Some("cs") {
+        return Vec::new();
+    }
+
+    if !content.contains("[HttpTrigger(") {
+        return Vec::new();
+    }
+
+    let mut routes = Vec::new();
+
+    let attr_default = Regex::new(
+r#"\[HttpTrigger\(AuthorizationLevel\.(\w+)(?:\s*,\s*"(\w+)")?(?:\s*,\s*Route\s*=\s*"([^"]*)")?\s*\)\]"#    )
+    .unwrap();
+    for cap in attr_default.captures_iter(content) {
+        let offset = cap.get(0).unwrap().start();
+        let _auth_level = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let method = cap.get(2).map(|m| m.as_str()).unwrap_or("get");
+        let route = cap.get(3).map(|m| m.as_str()).unwrap_or("");
+
+        if let Ok(method) = HttpMethod::try_from(method) {
+            routes.push(RouteInfo {
+                method,
+                path: format!("/{}", route),
+                framework: "azurefunction".to_string(),
+                source: path.to_path_buf(),
+                line: line_number(content, offset),
+            });
+        }
+    }
+
+    let attr_with_methods = Regex::new(
+        r#"\[HttpTrigger\(AuthorizationLevel\.(\w+)\s*,\s*((?:"[^"]+"\s*,?\s*)+)(?:,?\s*Route\s*=\s*"([^"]*)")?\s*\)\]"#,
+    )
+    .unwrap();
+    let method_re = Regex::new(r#""([^"]+)""#).unwrap();
+
+    for cap in attr_with_methods.captures_iter(content) {
+        let offset = cap.get(0).unwrap().start();
+        let _auth_level = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let methods_blob = cap.get(2).unwrap().as_str();
+        let route = cap.get(3).map(|m| m.as_str()).unwrap_or("");
+
+        for mc in method_re.captures_iter(methods_blob) {
+            let method_str = mc.get(1).unwrap().as_str();
+            if let Ok(method) = HttpMethod::try_from(method_str) {
+                routes.push(RouteInfo {
+                    method,
+                    path: format!("/{}", route),
+                    framework: "azurefunction".to_string(),
+                    source: path.to_path_buf(),
+                    line: line_number(content, offset),
+                });
+            }
+        }
+    }
+
+    // Helper — extract individual method strings from captured methods_blob
+    let _method_re = Regex::new(r#""([^"]+)""#).unwrap();
 
     routes
 }
