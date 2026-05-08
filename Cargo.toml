@@ -1,7 +1,7 @@
 [package]
 name = "volt"
 version = "1.3.4"
-edition = "2024"
+edition = "2021"
 description = "A terminal HTTP client for developers."
 license = "MIT"
 homepage = "https://github.com/frypan05/volt"
@@ -40,3 +40,8 @@ once_cell = "1.21.4"
 clap = { version = "4.5", features = ["derive"] }
 inquire = "0.7"
 directories = "6.0.0"
+async-trait = "0.1"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+env_logger = "0.11"

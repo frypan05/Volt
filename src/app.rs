@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::time::Duration;
+use std::sync::Arc;
+// use std::time::Duration;
 
 use arboard::Clipboard;
 use ratatui::style::{Color, Style};
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
+use crate::executor::Executor;
 use crate::http::{self, HttpResult};
 use crate::scanner::{self, RouteInfo, ScannerReport};
 use crate::ui::highlight::{self, ResponseView};
@@ -451,8 +453,7 @@ pub struct App {
     pub custom_route_dialog: Option<CustomRouteDialog>,
     pub auth_dialog: Option<AuthDialog>,
     pub last_area: ratatui::layout::Rect,
-    pub http_client: reqwest::Client,
-
+    // pub http_client: reqwest::Client,
     /// The working directory Volt was launched from.  Used to read/write the
     /// persisted custom-routes file.
     pub working_dir: std::path::PathBuf,
@@ -467,6 +468,15 @@ pub struct App {
 
     /// The selected theme name.
     pub theme: String,
+
+    /// The name of the current executor (e.g., "Local" or "SSH:prod@bastion.com")
+    /// This is set during initialization based on CLI flags
+    pub executor_name: Option<String>,
+
+    /// The executor responsible for running HTTP requests.
+    /// Can be either LocalExecutor (runs requests locally)
+    /// or RemoteExecutor (runs requests on a remote machine).
+    pub executor: Arc<dyn Executor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,6 +514,7 @@ impl App {
         config: AppConfig,
         global_config: crate::config::GlobalConfig,
         msg_tx: mpsc::UnboundedSender<AppMsg>,
+        executor: Arc<dyn Executor>,
     ) -> Self {
         let routes = report.routes.clone();
         let _ = dotenvy::dotenv();
@@ -515,13 +526,13 @@ impl App {
             url_history.insert(0, config.base_url.clone());
         }
 
-        let http_client = reqwest::Client::builder()
-            .tcp_nodelay(true)
-            .pool_max_idle_per_host(8)
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .expect("failed to build reqwest client");
+        // let http_client = reqwest::Client::builder()
+        //     .tcp_nodelay(true)
+        //     .pool_max_idle_per_host(8)
+        //     .timeout(Duration::from_secs(30))
+        //     .connect_timeout(Duration::from_secs(10))
+        //     .build()
+        //     .expect("failed to build reqwest client");
 
         let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
@@ -569,12 +580,14 @@ impl App {
             custom_route_dialog: None,
             auth_dialog: None,
             last_area: ratatui::layout::Rect::default(),
-            http_client,
+            // http_client,
             working_dir,
             custom_route_base_urls: report.persisted_base_urls,
             is_too_broad: report.is_too_broad,
             theme: global_config.theme,
+            executor_name: None,
             resize_target: ResizeTarget::None,
+            executor,
         }
     }
 
@@ -671,10 +684,10 @@ impl App {
 
         let draft = self.current_draft();
         let tx = self.msg_tx.clone();
-        let client = self.http_client.clone();
+        let executor = self.executor.clone();
 
         tokio::spawn(async move {
-            let result = http::execute(client, route, draft).await;
+            let result = http::execute(&*executor, route, draft).await;
             let _ = tx.send(AppMsg::RawResult(result));
         });
     }

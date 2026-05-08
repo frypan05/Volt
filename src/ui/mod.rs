@@ -1,6 +1,5 @@
 pub mod highlight;
 
-use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -8,8 +7,8 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Tabs, Wrap,
 };
+use ratatui::Frame;
 
-use crate::VERSION;
 use crate::app::{
     App, AuthDialogField, AuthType, BodyType, CustomRouteField, EditorTab, FocusPane, HttpMethod,
     InputTarget,
@@ -174,7 +173,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
-    let version_str = format!(" Donate  v{} ", VERSION);
+    let version_str = format!(" Donate  v{} ", env!("CARGO_PKG_VERSION"));
     let right_w = version_str.len() as u16;
 
     let (left_area, right_area) = if area.width > right_w + 20 {
@@ -220,6 +219,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
         Span::raw("copy response "),
         Span::raw(" | "),
         Span::raw(&app.status_message),
+        Span::raw(format!(
+            " | Executor: {}",
+            app.executor_name.as_deref().unwrap_or("Local")
+        )),
         extra,
     ]);
     frame.render_widget(Paragraph::new(left_text).bg(Color::Indexed(234)), left_area);
@@ -228,7 +231,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
         let right_line = Line::from(vec![
             Span::raw(" "),
             Span::styled("  ", Style::default().fg(theme.comment)),
-            Span::styled(format!("v{}", VERSION), Style::default().fg(theme.comment)),
+            Span::styled(
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(theme.comment),
+            ),
             Span::raw(" "),
         ]);
         frame.render_widget(

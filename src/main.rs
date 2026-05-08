@@ -1,10 +1,14 @@
+mod agent; // NEW: Remote agent protocol
 mod app;
 mod config;
+mod executor; // NEW: Executor trait and local executor
 mod http;
+mod remote; // NEW: SSH remote execution
 mod scanner;
 mod ui;
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ui::highlight::ResponseView;
@@ -17,6 +21,7 @@ use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     MouseEventKind,
 };
+use executor::{Executor, LocalExecutor};
 use tokio::sync::mpsc;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -32,6 +37,12 @@ struct Cli {
     theme: Option<String>,
     #[arg(long = "update", short = 'U')]
     update_flag: bool,
+    #[arg(long)]
+    remote: Option<String>,
+    #[arg(long)]
+    remote_list: bool,
+    #[arg(long, hide = true)] // hidden — only called via SSH by RemoteExecutor
+    agent: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -44,6 +55,9 @@ enum Commands {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if cli.agent {
+        return run_agent().await;
+    }
     if matches!(cli.command, Some(Commands::Update)) || cli.update_flag {
         return handle_update().await;
     }
@@ -72,6 +86,40 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if cli.remote_list {
+        // Create .volt.toml template if it doesn't exist
+        match config::AppConfig::create_template_if_missing() {
+            Ok(true) => {
+                println!(
+                ".volt.toml created in your project directory, configure it to establish SSH API Execution"
+            );
+                return Ok(());
+            }
+            Ok(false) => {} // file already exists, proceed normally
+            Err(e) => eprintln!("Warning: could not create .volt.toml: {}", e),
+        }
+
+        // Re-load config now that the file may exist
+        let config = config::AppConfig::load()?;
+
+        if let Some(remote_profiles) = &config.remote {
+            if remote_profiles.is_empty() {
+                println!("No remote profiles configured in .volt.toml");
+            } else {
+                println!("Available remote profiles:");
+                for (name, profile) in remote_profiles {
+                    println!(
+                        "  {} - {}@{}:{}",
+                        name, profile.user, profile.host, profile.port
+                    );
+                }
+            }
+        } else {
+            println!("No remote profiles configured in .volt.toml");
+        }
+        return Ok(());
+    }
+
     tokio::task::spawn_blocking(ui::highlight::prewarm)
         .await
         .expect("prewarm panicked");
@@ -84,7 +132,54 @@ async fn main() -> anyhow::Result<()> {
     let routes = scanner::scan_current_dir().unwrap_or(fallback_routes);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppMsg>();
-    let mut app: App = App::new(routes, config, global_config, tx);
+
+    // Create the executor based on --remote flag
+    let executor: Arc<dyn Executor> = if let Some(remote_name) = &cli.remote {
+        if let Some(remotes) = &config.remote {
+            if let Some(profile) = remotes.get(remote_name) {
+                let mut ssh_config =
+                    remote::SshConfig::new(&profile.host, &profile.user).with_port(profile.port);
+                if let Some(ref identity) = profile.identity {
+                    ssh_config = ssh_config.with_identity(identity);
+                }
+                match remote::RemoteExecutor::new(ssh_config).await {
+                    Ok(exec) => Arc::new(exec),
+                    Err(e) => {
+                        eprintln!(
+                            "Error: failed to connect to remote '{}': {}",
+                            remote_name, e
+                        );
+                        return Ok(());
+                    }
+                }
+            } else {
+                eprintln!(
+                    "Error: remote profile '{}' not found in .volt.toml",
+                    remote_name
+                );
+                return Ok(());
+            }
+        } else {
+            eprintln!("Error: no remote profiles configured in .volt.toml");
+            return Ok(());
+        }
+    } else {
+        // Use local executor by default
+        Arc::new(LocalExecutor::new())
+    };
+
+    let mut app: App = App::new(routes, config.clone(), global_config, tx, executor.clone());
+
+    // Set executor name for display in UI
+    if let Some(remote_name) = cli.remote {
+        if let Some(remotes) = &config.remote {
+            if let Some(profile) = remotes.get(&remote_name) {
+                app.executor_name = Some(format!("SSH:{}@{}", profile.user, profile.host));
+            }
+        }
+    } else {
+        app.executor_name = Some("Local".to_string());
+    }
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -483,4 +578,95 @@ fn handle_auth_dialog_key(app: &mut App, key: KeyEvent) {
             }
         },
     }
+}
+async fn run_agent() -> anyhow::Result<()> {
+    use crate::agent::protocol::{AgentMessage, ControllerMessage};
+    // use std::collections::HashMap;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+    let mut lines = BufReader::new(stdin).lines();
+    let mut out = tokio::io::BufWriter::new(stdout);
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+
+        let msg: AgentMessage = match serde_json::from_str::<ControllerMessage>(&line) {
+            Ok(ControllerMessage::Execute(payload)) => {
+                let request_id = payload.request_id.clone();
+                match agent_execute(&client, payload).await {
+                    Ok(result) => AgentMessage::ExecutionResult(result),
+                    Err(e) => AgentMessage::Error(format!("{}: {}", request_id, e)),
+                }
+            }
+            Ok(ControllerMessage::Health) => AgentMessage::HealthOk,
+            Ok(ControllerMessage::Shutdown) => break,
+            Err(e) => AgentMessage::Error(format!("parse error: {}", e)),
+        };
+
+        if let Ok(json) = serde_json::to_string(&msg) {
+            out.write_all(format!("{}\n", json).as_bytes()).await?;
+            out.flush().await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn agent_execute(
+    client: &reqwest::Client,
+    payload: crate::agent::protocol::ExecutionPayload,
+) -> anyhow::Result<crate::agent::protocol::ExecutionResult> {
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    let method = reqwest::Method::from_bytes(payload.method.as_bytes())?;
+    let mut req = client.request(method, &payload.url);
+
+    for (k, v) in &payload.headers {
+        req = req.header(k, v);
+    }
+    if !payload.query_params.is_empty() {
+        req = req.query(&payload.query_params);
+    }
+    if let Some(body) = payload.body {
+        req = req.body(body);
+    }
+    if let Some(ms) = payload.timeout_ms {
+        req = req.timeout(std::time::Duration::from_millis(ms));
+    }
+
+    let start = Instant::now();
+    let response = req.send().await?;
+    let status = response.status().as_u16();
+    let headers: HashMap<String, String> = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    let body = response.text().await.unwrap_or_default();
+    let duration_ms = start.elapsed().as_millis();
+    let size_bytes = body.len();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    Ok(crate::agent::protocol::ExecutionResult {
+        request_id: payload.request_id,
+        status,
+        headers,
+        body,
+        duration_ms,
+        size_bytes,
+        timestamp,
+    })
 }
