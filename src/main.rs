@@ -8,7 +8,10 @@ use std::io;
 use std::time::Duration;
 
 use crate::ui::highlight::ResponseView;
-use app::{App, AppMsg, BodyType, CustomRouteField, EditorTab, FocusPane, InputTarget};
+use app::{
+    App, AppMsg, AuthDialogField, AuthType, BodyType, CustomRouteField, EditorTab, FocusPane,
+    InputTarget,
+};
 use clap::Parser;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -21,35 +24,26 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Parser)]
 #[command(name = "volt")]
 #[command(about = "A terminal HTTP client for developers.", long_about = None)]
-#[command(version)] // Automatically uses version from Cargo.toml
+#[command(version)]
 struct Cli {
-    /// List all available themes
     #[arg(long)]
     themes: bool,
-
-    /// Set the theme
     #[arg(long)]
     theme: Option<String>,
-
-    /// Update volt to the latest version from GitHub
     #[arg(long = "update", short = 'U')]
     update_flag: bool,
-
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
 #[derive(clap::Subcommand)]
 enum Commands {
-    /// Update volt to the latest version from GitHub
     Update,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-
-    // Both `volt update` (subcommand) and `volt --update` / `volt -U` (flag) trigger the updater.
     if matches!(cli.command, Some(Commands::Update)) || cli.update_flag {
         return handle_update().await;
     }
@@ -60,7 +54,6 @@ async fn main() -> anyhow::Result<()> {
     if cli.themes {
         let options = vec!["vesper", "dracula", "gruvbox", "tokyo-night"];
         let ans = inquire::Select::new("Select a theme:", options).prompt();
-
         match ans {
             Ok(choice) => {
                 global_config.theme = choice.to_string();
@@ -83,14 +76,15 @@ async fn main() -> anyhow::Result<()> {
         .await
         .expect("prewarm panicked");
 
-    let routes = scanner::scan_current_dir().unwrap_or_else(|_| scanner::ScannerReport {
+    let fallback_routes: scanner::ScannerReport = scanner::ScannerReport {
         routes: Vec::new(),
-        persisted_base_urls: std::collections::HashMap::new(),
+        persisted_base_urls: std::collections::HashMap::<String, String>::new(),
         is_too_broad: false,
-    });
+    };
+    let routes = scanner::scan_current_dir().unwrap_or(fallback_routes);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppMsg>();
-    let mut app = App::new(routes, config, global_config, tx);
+    let mut app: App = App::new(routes, config, global_config, tx);
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -110,7 +104,6 @@ async fn main() -> anyhow::Result<()> {
         }
 
         terminal.draw(|f| ui::draw(f, &mut app))?;
-
         if app.should_quit {
             break;
         }
@@ -123,30 +116,8 @@ async fn main() -> anyhow::Result<()> {
         if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    handle_key(&mut app, key).await;
+                    handle_key(&mut app, key).await
                 }
-                // // Ctrl+Left Click — check if the user clicked the Donate button.
-                // Event::Mouse(m)
-                //     if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left)
-                //         && m.modifiers
-                //             .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                // {
-                //     let area = app.last_area;
-                //     let footer_row = area.height.saturating_sub(1);
-                //     if m.row == footer_row {
-                //         let version_str = format!(" Donate  v{} ", VERSION);
-                //         let right_w = version_str.len() as u16;
-                //         if area.width > right_w + 20 {
-                //             let donate_start = area.width.saturating_sub(right_w);
-                //             if m.column >= donate_start && m.column < donate_start + right_w {
-                //                 open_url("https://ko-fi.com/dakshsharma05");
-                //                 app.status_message = "Opening Ko-fi in your browser…".to_string();
-                //             }
-                //         }
-                //     }
-                //     // Still deliver the click for regular pane focus / resize.
-                //     app.handle_mouse_click(m.column, m.row);
-                // }
                 Event::Mouse(m)
                     if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) =>
                 {
@@ -182,146 +153,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// URL opener (cross-platform)
-// ---------------------------------------------------------------------------
-
-// fn open_url(url: &str) {
-//     #[cfg(target_os = "windows")]
-//     {
-//         let _ = std::process::Command::new("cmd")
-//             .args(["/c", "start", "", url])
-//             .spawn();
-//     }
-//     #[cfg(target_os = "macos")]
-//     {
-//         let _ = std::process::Command::new("open").arg(url).spawn();
-//     }
-//     #[cfg(target_os = "linux")]
-//     {
-//         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-//     }
-// }
-
-// ---------------------------------------------------------------------------
-// Updater
-// ---------------------------------------------------------------------------
-
 async fn handle_update() -> anyhow::Result<()> {
     println!("Checking for updates...");
-    let client = reqwest::Client::builder()
-        .user_agent("volt-updater")
-        .build()?;
-
-    let release: serde_json::Value = client
-        .get("https://api.github.com/repos/frypan05/volt/releases/latest")
-        .send()
-        .await?
-        .json()
-        .await?;
-
-    let latest_tag = release["tag_name"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Could not find latest version tag"))?
-        .trim_start_matches('v');
-
-    let current_version = VERSION;
-
-    if latest_tag == current_version {
-        println!(
-            "You are already on the latest version (v{}).",
-            current_version
-        );
-        return Ok(());
-    }
-
-    println!(
-        "New version available: v{} (current: v{})",
-        latest_tag, current_version
-    );
-
-    let assets = release["assets"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("No assets found in latest release"))?;
-
-    let target_os = std::env::consts::OS;
-    let asset_name = match target_os {
-        "windows" => "volt-windows.exe",
-        "linux" => "volt-linux",
-        "macos" => "volt-macos",
-        _ => return Err(anyhow::anyhow!("Unsupported OS for auto-update")),
-    };
-
-    let asset = assets
-        .iter()
-        .find(|a| a["name"].as_str() == Some(asset_name))
-        .ok_or_else(|| {
-            anyhow::anyhow!("Could not find binary for {} in latest release", target_os)
-        })?;
-
-    let download_url = asset["browser_download_url"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No download URL for asset"))?;
-
-    println!("Downloading {}...", asset_name);
-    let bytes = client.get(download_url).send().await?.bytes().await?;
-
-    let current_exe = std::env::current_exe()?;
-    let tmp_exe = current_exe.with_extension("tmp");
-
-    std::fs::write(&tmp_exe, bytes)?;
-
-    #[cfg(windows)]
-    {
-        let old_exe = current_exe.with_extension("old");
-        if old_exe.exists() {
-            std::fs::remove_file(&old_exe)?;
-        }
-        std::fs::rename(&current_exe, &old_exe)?;
-        std::fs::rename(&tmp_exe, &current_exe)?;
-        println!("Update successful! You can now delete {:?}.", old_exe);
-    }
-
-    #[cfg(not(windows))]
-    {
-        std::fs::rename(&tmp_exe, &current_exe)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&current_exe)?.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&current_exe, perms)?;
-        }
-    }
-
-    println!("Successfully updated to v{}!", latest_tag);
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Key handler
-// ---------------------------------------------------------------------------
-
 async fn handle_key(app: &mut App, key: KeyEvent) {
-    // -----------------------------------------------------------------------
-    // View picker popup — highest priority overlay, handles its own keys.
-    // -----------------------------------------------------------------------
     if app.view_picker_open {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                app.view_picker_open = false;
-            }
+            KeyCode::Esc | KeyCode::Char('q') => app.view_picker_open = false,
             KeyCode::Char('1') => app.select_view(ResponseView::Auto),
             KeyCode::Char('2') => app.select_view(ResponseView::Json),
             KeyCode::Char('3') => app.select_view(ResponseView::Html),
             KeyCode::Char('4') => app.select_view(ResponseView::Text),
             KeyCode::Char('5') => app.select_view(ResponseView::Raw),
-            KeyCode::Char('k') | KeyCode::Down => {
-                app.response.view = app.response.view.next();
-            }
-            KeyCode::Char('j') | KeyCode::Up => {
-                app.response.view = app.response.view.prev();
-            }
+            KeyCode::Char('k') | KeyCode::Down => app.response.view = app.response.view.next(),
+            KeyCode::Char('j') | KeyCode::Up => app.response.view = app.response.view.prev(),
             KeyCode::Enter => {
                 let view = app.response.view;
                 app.select_view(view);
@@ -336,22 +183,30 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // -----------------------------------------------------------------------
-    // Text / KV editing mode
-    // -----------------------------------------------------------------------
+    if app.auth_dialog.is_some() {
+        handle_auth_dialog_key(app, key);
+        return;
+    }
+
     if app.input_mode {
         match key.code {
             KeyCode::Esc => app.stop_editing(),
-
             KeyCode::Tab => {
                 if let InputTarget::Tab(t) = app.input_target {
-                    if t != EditorTab::Body {
+                    if t == EditorTab::Auth {
+                        let d = app.current_draft_mut();
+                        match d.auth_type {
+                            AuthType::BasicAuth | AuthType::ApiKey => {
+                                d.active_col = (d.active_col + 1) % 2;
+                            }
+                            _ => {}
+                        }
+                    } else if t != EditorTab::Body {
                         let d = app.current_draft_mut();
                         d.active_col = (d.active_col + 1) % 2;
                     }
                 }
             }
-
             KeyCode::Backspace => {
                 let is_kv = matches!(app.input_target, InputTarget::Tab(t) if t != EditorTab::Body);
                 let col = app.current_draft().active_col;
@@ -361,11 +216,7 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                     app.active_buffer_mut().backspace();
                 }
             }
-
-            KeyCode::Delete => {
-                app.active_buffer_mut().delete();
-            }
-
+            KeyCode::Delete => app.active_buffer_mut().delete(),
             KeyCode::Left => {
                 if app.input_target == InputTarget::BaseUrl {
                     app.active_buffer_mut().move_left();
@@ -385,7 +236,6 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                     app.active_buffer_mut().move_left();
                 }
             }
-
             KeyCode::Right => {
                 let is_kv = matches!(app.input_target, InputTarget::Tab(t) if t != EditorTab::Body);
                 let col = app.current_draft().active_col;
@@ -404,15 +254,12 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                     app.active_buffer_mut().move_right();
                 }
             }
-
             KeyCode::Home => app.active_buffer_mut().move_home(),
             KeyCode::End => app.active_buffer_mut().move_end(),
-
             KeyCode::Up if app.input_target == InputTarget::BaseUrl => app.cycle_url_history(true),
             KeyCode::Down if app.input_target == InputTarget::BaseUrl => {
                 app.cycle_url_history(false)
             }
-
             KeyCode::Up => {
                 if matches!(app.input_target, InputTarget::Tab(_)) {
                     app.move_row(true);
@@ -423,7 +270,6 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                     app.move_row(false);
                 }
             }
-
             KeyCode::Enter => {
                 if app.input_target == InputTarget::Tab(EditorTab::Body) {
                     app.active_buffer_mut().insert_newline();
@@ -433,18 +279,12 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                     app.move_row(false);
                 }
             }
-
-            KeyCode::Char(c) => {
-                app.active_buffer_mut().insert_char(c);
-            }
+            KeyCode::Char(c) => app.active_buffer_mut().insert_char(c),
             _ => {}
         }
         return;
     }
 
-    // -----------------------------------------------------------------------
-    // Body-type selector sub-mode
-    // -----------------------------------------------------------------------
     if app.body_type_focused {
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => {
@@ -457,16 +297,13 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                 }
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                // Wrap at the rightmost (Form) back to None — or just cycle.
                 let d = app.current_draft_mut();
                 d.body_type = d.body_type.next();
             }
-            // Esc or ↑ or k: exit sub-mode and move focus to the Auth tab.
             KeyCode::Esc | KeyCode::Up | KeyCode::Char('k') => {
                 app.body_type_focused = false;
                 app.editor_tab = EditorTab::Auth;
             }
-            // 'i' enters body text edit (only if a type other than None is chosen).
             KeyCode::Char('i') => {
                 if app.current_draft().body_type != BodyType::None {
                     app.body_type_focused = false;
@@ -478,26 +315,19 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // -----------------------------------------------------------------------
-    // Normal navigation
-    // -----------------------------------------------------------------------
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
-
         KeyCode::Tab => app.focus_next(),
         KeyCode::BackTab => app.focus_prev(),
-
         KeyCode::Char('k') | KeyCode::Down if app.focus == FocusPane::Explorer => {
             app.move_explorer_selection(true);
         }
         KeyCode::Char('j') | KeyCode::Up if app.focus == FocusPane::Explorer => {
             app.move_explorer_selection(false);
         }
-
         KeyCode::Char('d') if app.focus == FocusPane::Explorer => {
-            app.delete_selected_custom_route();
+            app.delete_selected_custom_route()
         }
-
         KeyCode::Char('k') | KeyCode::Down if app.focus == FocusPane::Viewer => {
             app.scroll_viewer(false)
         }
@@ -508,14 +338,9 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::PageUp if app.focus == FocusPane::Viewer => app.scroll_viewer_page(true),
         KeyCode::Home if app.focus == FocusPane::Viewer => app.viewer_scroll = 0,
         KeyCode::End if app.focus == FocusPane::Viewer => app.viewer_scroll = u16::MAX,
-
-        // View picker / cycling — ONLY when Viewer pane is focused and not in
-        // any input mode, so '/' typed in URL fields or custom-route paths is
-        // never swallowed by this shortcut.
         KeyCode::Char('/') if app.focus == FocusPane::Viewer => app.open_view_picker(),
         KeyCode::Char('[') if app.focus == FocusPane::Viewer => app.cycle_response_view(false),
         KeyCode::Char(']') if app.focus == FocusPane::Viewer => app.cycle_response_view(true),
-
         KeyCode::Char('y') if app.focus == FocusPane::Viewer => {
             if app.copy_response_to_clipboard() {
                 app.status_message = "Copied response to clipboard".to_string();
@@ -523,11 +348,6 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                 app.status_message = "Nothing to copy".to_string();
             }
         }
-
-        // Editor tab navigation with h / l / arrows.
-        // When already on the Body tab, ← / → enters the body-type sub-mode
-        // WITHOUT immediately changing the type — the user first sees the
-        // selector highlighted, then uses ← / → to change.
         KeyCode::Char('h') | KeyCode::Left if app.focus == FocusPane::Editor => {
             if app.editor_tab == EditorTab::Body {
                 app.body_type_focused = true;
@@ -542,9 +362,7 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                 app.editor_tab = app.editor_tab.next();
             }
         }
-
         KeyCode::Char('u') => app.start_editing(InputTarget::BaseUrl),
-
         KeyCode::Char('i') if app.focus == FocusPane::Editor => {
             if app.editor_tab == EditorTab::Body {
                 if app.current_draft().body_type != BodyType::None {
@@ -552,19 +370,18 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                 } else {
                     app.body_type_focused = true;
                 }
+            } else if app.editor_tab == EditorTab::Auth {
+                app.open_auth_dialog();
             } else {
                 app.start_editing(InputTarget::Tab(app.editor_tab));
             }
         }
-
         KeyCode::Char('n')
             if app.focus == FocusPane::Editor && app.editor_tab != EditorTab::Body =>
         {
             app.add_kv_row();
         }
-
         KeyCode::Char('r') => app.execute_current_request().await,
-
         KeyCode::Enter if app.focus == FocusPane::Explorer => {
             if app.selected_is_add_custom() {
                 app.open_custom_route_dialog();
@@ -572,7 +389,6 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                 app.focus = FocusPane::Editor;
             }
         }
-
         _ => {}
     }
 }
@@ -597,6 +413,74 @@ fn handle_dialog_key(app: &mut App, key: KeyEvent) {
             KeyCode::Enter => app.confirm_custom_route(),
             KeyCode::Esc => app.custom_route_dialog = None,
             _ => {}
+        },
+    }
+}
+
+fn handle_auth_dialog_key(app: &mut App, key: KeyEvent) {
+    let mode = app.auth_dialog.as_ref().map(|d| d.active_field);
+    let Some(mode) = mode else {
+        return;
+    };
+    match mode {
+        AuthDialogField::TypeSelector => match key.code {
+            KeyCode::Left | KeyCode::Char('h') => {
+                let d = app.current_draft_mut();
+                d.auth_type = d.auth_type.prev();
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                let d = app.current_draft_mut();
+                d.auth_type = d.auth_type.next();
+            }
+            KeyCode::Tab | KeyCode::Enter => {
+                if app.current_draft().auth_type != AuthType::None {
+                    if let Some(dialog) = app.auth_dialog.as_mut() {
+                        dialog.active_field = AuthDialogField::InputFields;
+                    }
+                    app.input_mode = true;
+                    app.input_target = InputTarget::Tab(EditorTab::Auth);
+                    app.current_draft_mut().active_col = 0;
+                }
+            }
+            KeyCode::Esc => app.auth_dialog = None,
+            _ => {}
+        },
+        AuthDialogField::InputFields => match key.code {
+            KeyCode::Esc => {
+                app.input_mode = false;
+                app.auth_dialog = None;
+            }
+            KeyCode::Tab => {
+                let auth_type = app.current_draft().auth_type;
+                match auth_type {
+                    AuthType::BasicAuth | AuthType::ApiKey => {
+                        let d = app.current_draft_mut();
+                        d.active_col = (d.active_col + 1) % 2;
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::Enter => {
+                app.auth_dialog = None;
+                app.input_mode = false;
+            }
+            _ => {
+                app.input_mode = true;
+                app.input_target = InputTarget::Tab(EditorTab::Auth);
+                if let KeyCode::Char(c) = key.code {
+                    app.active_buffer_mut().insert_char(c);
+                } else if key.code == KeyCode::Backspace {
+                    app.active_buffer_mut().backspace();
+                } else if key.code == KeyCode::Left {
+                    app.active_buffer_mut().move_left();
+                } else if key.code == KeyCode::Right {
+                    app.active_buffer_mut().move_right();
+                } else if key.code == KeyCode::Home {
+                    app.active_buffer_mut().move_home();
+                } else if key.code == KeyCode::End {
+                    app.active_buffer_mut().move_end();
+                }
+            }
         },
     }
 }

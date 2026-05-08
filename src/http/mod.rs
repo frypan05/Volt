@@ -1,8 +1,9 @@
-use crate::app::{BodyType, HttpMethod, RequestDraft};
+use crate::app::{AuthType, BodyType, HttpMethod, RequestDraft};
 use crate::scanner::RouteInfo;
+use base64::Engine;
 use reqwest::{
     Client, Method,
-    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
 };
 use std::time::Instant;
 
@@ -45,16 +46,37 @@ pub async fn execute(client: Client, route: RouteInfo, draft: RequestDraft) -> H
             headers.insert(n, v);
         }
     }
-    for row in draft
-        .auth
-        .iter()
-        .filter(|r| r.enabled && !r.key.text.is_empty())
-    {
-        if let (Ok(n), Ok(v)) = (
-            HeaderName::from_bytes(row.key.text.as_bytes()),
-            HeaderValue::from_str(&row.value.text),
-        ) {
-            headers.insert(n, v);
+
+    // Auth headers
+    match draft.auth_type {
+        AuthType::None => {}
+        AuthType::BasicAuth => {
+            if !draft.auth_username.text.is_empty() {
+                let credentials = base64::engine::general_purpose::STANDARD.encode(format!(
+                    "{}:{}",
+                    draft.auth_username.text, draft.auth_password.text
+                ));
+                if let Ok(v) = HeaderValue::from_str(&format!("Basic {}", credentials)) {
+                    headers.insert(AUTHORIZATION, v);
+                }
+            }
+        }
+        AuthType::BearerToken => {
+            if !draft.auth_token.text.is_empty() {
+                if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", draft.auth_token.text)) {
+                    headers.insert(AUTHORIZATION, v);
+                }
+            }
+        }
+        AuthType::ApiKey => {
+            if !draft.auth_header_name.text.is_empty() && !draft.auth_header_value.text.is_empty() {
+                if let (Ok(n), Ok(v)) = (
+                    HeaderName::from_bytes(draft.auth_header_name.text.as_bytes()),
+                    HeaderValue::from_str(&draft.auth_header_value.text),
+                ) {
+                    headers.insert(n, v);
+                }
+            }
         }
     }
 

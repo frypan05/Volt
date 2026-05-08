@@ -146,3 +146,9 @@ volt scans the current working directory and lists detected routes. By default r
 - Route discovery uses fast heuristics instead of full AST parsing.
 - The insert mode is intentionally lightweight and optimized for request payload editing.
 - Large responses are rendered inline; future versions should add paging and streaming.
+
+## In Queue Features:
+- Graph QL support
+- Graph based route discovery
+- SSH Remote Execution Mode (From inside VMs, Containers, staging nodes, pods, etc.)
+-

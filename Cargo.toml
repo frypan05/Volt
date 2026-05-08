@@ -17,6 +17,7 @@ panic = "abort"
 [dependencies]
 anyhow     = "1.0"
 arboard    = { version = "3.4", default-features = false, features = ["wayland-data-control"] }
+base64     = "0.22"
 crossterm  = "0.28"
 ignore     = "0.4"
 ratatui    = "0.29"

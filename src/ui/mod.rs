@@ -10,7 +10,10 @@ use ratatui::widgets::{
 };
 
 use crate::VERSION;
-use crate::app::{App, BodyType, CustomRouteField, EditorTab, FocusPane, HttpMethod, InputTarget};
+use crate::app::{
+    App, AuthDialogField, AuthType, BodyType, CustomRouteField, EditorTab, FocusPane, HttpMethod,
+    InputTarget,
+};
 use crate::ui::highlight::ResponseView;
 
 // ---------------------------------------------------------------------------
@@ -131,6 +134,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.custom_route_dialog.is_some() {
         draw_custom_route_dialog(frame, app, theme);
     }
+    if app.auth_dialog.is_some() {
+        draw_auth_dialog(frame, app, theme);
+    }
     if app.pending_request {
         draw_loader(frame, app, cols[2], theme);
     }
@@ -168,13 +174,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
-    // Right-side content: "Donate  v{VERSION}"
-    // Compute width: leading space + "Donate" + double-space + "v" + version + trailing space
     let version_str = format!(" Donate  v{} ", VERSION);
     let right_w = version_str.len() as u16;
 
-    // Split the footer row: left gets keybindings, right gets donate+version.
-    // Guard against terminals so narrow the right panel would not fit.
     let (left_area, right_area) = if area.width > right_w + 20 {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -185,7 +187,6 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
         (area, None)
     };
 
-    // Left: existing keybindings (unchanged)
     let key = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
     let extra = if app.body_type_focused {
         Span::styled(
@@ -223,17 +224,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     ]);
     frame.render_widget(Paragraph::new(left_text).bg(Color::Indexed(234)), left_area);
 
-    // Right: Donate  vX.Y.Z — styled to match the UI palette
     if let Some(r) = right_area {
         let right_line = Line::from(vec![
             Span::raw(" "),
-            // Span::styled(
-            //     "Donate",
-            //     Style::default()
-            //         .fg(theme.teal)
-            //         .add_modifier(Modifier::BOLD)
-            //         .add_modifier(Modifier::UNDERLINED),
-            // ),
             Span::styled("  ", Style::default().fg(theme.comment)),
             Span::styled(format!("v{}", VERSION), Style::default().fg(theme.comment)),
             Span::raw(" "),
@@ -428,10 +421,63 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     }
     let draft = app.current_draft();
     let tab = app.editor_tab;
+
+    // -----------------------------------------------------------------------
+    // Auth tab: show status + open-dialog hint
+    // -----------------------------------------------------------------------
+    if tab == EditorTab::Auth {
+        let mut configured: Vec<&str> = Vec::new();
+        if !draft.auth_username.text.is_empty() || !draft.auth_password.text.is_empty() {
+            configured.push("Basic Auth");
+        }
+        if !draft.auth_token.text.is_empty() {
+            configured.push("Bearer Token");
+        }
+        if !draft.auth_header_name.text.is_empty() || !draft.auth_header_value.text.is_empty() {
+            configured.push("API Key");
+        }
+
+        let total_lines = 1 + configured.len() as u16;
+        let pad_top = area.height.saturating_sub(total_lines) / 2;
+
+        let mut constraints = vec![Constraint::Length(pad_top), Constraint::Length(1)];
+        for _ in &configured {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Min(0));
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+
+        frame.render_widget(
+            Paragraph::new("Press 'i' to open authentication dialog")
+                .style(Style::default().fg(theme.comment))
+                .alignment(Alignment::Center),
+            chunks[1],
+        );
+
+        for (i, label) in configured.iter().enumerate() {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("Auth set: ", Style::default().fg(theme.comment)),
+                    Span::styled(
+                        *label,
+                        Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                    ),
+                ]))
+                .alignment(Alignment::Center),
+                chunks[2 + i],
+            );
+        }
+        return;
+    }
+
     let rows = match tab {
         EditorTab::Headers => &draft.headers,
         EditorTab::Params => &draft.params,
-        EditorTab::Auth => &draft.auth,
+        EditorTab::Auth => unreachable!(),
         EditorTab::Body => return,
     };
     let tbl_h = area.height.saturating_sub(1);
@@ -540,7 +586,7 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     let btn_label = match tab {
         EditorTab::Headers => " + Add header",
         EditorTab::Params => " + Add param",
-        EditorTab::Auth => " + Add auth entry",
+        EditorTab::Auth => unreachable!(),
         _ => "",
     };
     frame.render_widget(
@@ -1168,6 +1214,578 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App, theme: Theme) {
             ])),
             rows[5],
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auth dialog
+// ---------------------------------------------------------------------------
+
+fn draw_auth_dialog(frame: &mut Frame, app: &App, theme: Theme) {
+    let Some(dialog) = &app.auth_dialog else {
+        return;
+    };
+
+    let fa = frame.area();
+    let px = if fa.width < 60 { 95u16 } else { 70 };
+    let py = if fa.height < 20 { 90u16 } else { 50 };
+    let area = centered_rect(px, py, fa);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Authentication ")
+        .border_style(Style::default().fg(theme.teal).add_modifier(Modifier::BOLD));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+    if inner.height < 4 {
+        return;
+    }
+
+    let draft = app.current_draft();
+    let is_type_focused = dialog.active_field == AuthDialogField::TypeSelector;
+
+    let av = inner.height;
+    let ml = if av >= 2 { 1u16 } else { 0 };
+    let mp = if av >= ml + 3 { 3u16 } else { 0 };
+    let g1 = if av > ml + mp { 1u16 } else { 0 };
+    let pl = if av > ml + mp + g1 { 1u16 } else { 0 };
+    let fixed_rows = ml + mp + g1 + pl;
+    let ht = if av > fixed_rows + 1 { 1u16 } else { 0 };
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(ml),
+            Constraint::Length(mp),
+            Constraint::Length(g1),
+            Constraint::Length(pl),
+            Constraint::Min(0), // input fields: expands to fill all remaining space
+            Constraint::Length(ht), // keybinding hint: pinned to 1 row
+        ])
+        .split(inner);
+
+    if ml > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " Auth Type  (← / → to select, Tab to move to inputs)",
+                if is_type_focused {
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.comment)
+                },
+            )),
+            rows[0],
+        );
+    }
+
+    if mp > 0 {
+        let mb = Block::default()
+            .borders(Borders::ALL)
+            .border_type(if is_type_focused {
+                BorderType::Rounded
+            } else {
+                BorderType::Plain
+            })
+            .border_style(if is_type_focused {
+                Style::default().fg(theme.teal)
+            } else {
+                Style::default().fg(Color::Indexed(238))
+            });
+        let pill_inner = mb.inner(rows[1]);
+        frame.render_widget(mb, rows[1]);
+        let mc = AuthType::ALL.len() as u32;
+        let pc = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(
+                (0..mc)
+                    .map(|_| Constraint::Ratio(1, mc))
+                    .collect::<Vec<_>>(),
+            )
+            .split(pill_inner);
+        for (i, t) in AuthType::ALL.iter().enumerate() {
+            let is_sel = *t == draft.auth_type;
+            let (bg, fg, mo) = if is_sel {
+                (
+                    method_pill_color(t.label(), theme),
+                    Color::Black,
+                    Modifier::BOLD,
+                )
+            } else {
+                (Color::Indexed(236), theme.comment, Modifier::empty())
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {} ", t.label()),
+                    Style::default().fg(fg).add_modifier(mo),
+                ))
+                .bg(bg)
+                .alignment(Alignment::Center),
+                pc[i],
+            );
+        }
+    }
+
+    if pl > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " Type a credential below when a mode is selected",
+                Style::default().fg(theme.comment),
+            )),
+            rows[3],
+        );
+    }
+
+    if rows[4].height > 0 {
+        if draft.auth_type == AuthType::None {
+            let pb = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(Color::Indexed(238)));
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " No Authentication ",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .block(pb),
+                rows[4],
+            );
+        } else {
+            draw_auth_dialog_fields(frame, app, rows[4], theme, is_type_focused);
+        }
+    }
+
+    if ht > 0 {
+        let key = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(" ←/→ ", key),
+                Span::raw("select  "),
+                Span::styled(" Tab ", key),
+                Span::raw("inputs  "),
+                Span::styled(" Enter ", key),
+                Span::raw("confirm  "),
+                Span::styled(" Esc ", key),
+                Span::raw("close"),
+            ])),
+            rows[5],
+        );
+    }
+}
+
+fn draw_auth_dialog_fields(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    theme: Theme,
+    _is_type_focused: bool,
+) {
+    if area.height < 2 {
+        return;
+    }
+
+    let draft = app.current_draft();
+    let in_input_mode = app.input_mode;
+    let dialog = app.auth_dialog.as_ref().unwrap();
+    let is_field_focused = dialog.active_field == AuthDialogField::InputFields;
+
+    match draft.auth_type {
+        // -----------------------------------------------------------------
+        // Basic Auth  — needs: label(1) + input(3) + label(1) + input(3) = 8
+        // -----------------------------------------------------------------
+        AuthType::BasicAuth => {
+            // Minimum usable height: both inputs visible (border-only = 2 each) + 2 labels = 6.
+            // Ideal: 9 rows. If we truly can't fit, show a resize nudge.
+            if area.height < 5 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " ↕ Resize terminal to see fields",
+                        Style::default()
+                            .fg(theme.orange)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .alignment(Alignment::Center),
+                    area,
+                );
+                return;
+            }
+
+            // Distribute available rows: labels are fixed 1 row each;
+            // give remaining space equally to the two input boxes.
+            let label_rows: u16 = 2; // username label + password label
+            let hint_row: u16 = if area.height >= 7 { 1 } else { 0 };
+            let input_space = area.height.saturating_sub(label_rows + hint_row);
+            // Each input gets half (minimum 1 so the box border shows).
+            let input1_h = (input_space / 2).max(1);
+            let input2_h = input_space.saturating_sub(input1_h).max(1);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),        // username label
+                    Constraint::Length(input1_h), // username input
+                    Constraint::Length(1),        // password label
+                    Constraint::Length(input2_h), // password input
+                    Constraint::Length(hint_row), // inline hint
+                    Constraint::Min(0),           // leftover
+                ])
+                .split(area);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Username",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                rows[0],
+            );
+
+            let username_focused = in_input_mode && is_field_focused && draft.active_col == 0;
+            let username_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(if username_focused {
+                    BorderType::Rounded
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(if username_focused {
+                    Style::default().fg(theme.yellow)
+                } else {
+                    Style::default().fg(Color::Indexed(238))
+                });
+            let username_line = if username_focused {
+                let len = draft.auth_username.text.len();
+                let cursor = draft.auth_username.cursor.min(len);
+                let before = &draft.auth_username.text[..cursor];
+                let after = &draft.auth_username.text[cursor..];
+                Line::from(vec![
+                    Span::raw(format!(" {}", before)),
+                    Span::styled(" ", Style::default().bg(Color::Indexed(238))),
+                    Span::raw(after.to_string()),
+                ])
+            } else {
+                let visible = if draft.auth_username.text.is_empty() {
+                    " username".to_string()
+                } else {
+                    format!(" {}", draft.auth_username.text)
+                };
+                Line::from(Span::styled(
+                    visible,
+                    if draft.auth_username.text.is_empty() {
+                        Style::default().fg(theme.comment)
+                    } else {
+                        Style::default().fg(theme.fg)
+                    },
+                ))
+            };
+            frame.render_widget(Paragraph::new(username_line).block(username_block), rows[1]);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Password",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                rows[2],
+            );
+
+            let password_focused = in_input_mode && is_field_focused && draft.active_col == 1;
+            let password_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(if password_focused {
+                    BorderType::Rounded
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(if password_focused {
+                    Style::default().fg(theme.yellow)
+                } else {
+                    Style::default().fg(Color::Indexed(238))
+                });
+            let password_line = if password_focused {
+                let len = draft.auth_password.text.len();
+                let cursor = draft.auth_password.cursor.min(len);
+                let before = "*".repeat(cursor);
+                let after = "*".repeat(len.saturating_sub(cursor));
+                Line::from(vec![
+                    Span::raw(format!(" {}", before)),
+                    Span::styled(" ", Style::default().bg(Color::Indexed(238))),
+                    Span::raw(after),
+                ])
+            } else {
+                let visible = if draft.auth_password.text.is_empty() {
+                    " password".to_string()
+                } else {
+                    format!(" {}", "*".repeat(draft.auth_password.text.len()))
+                };
+                Line::from(Span::styled(
+                    visible,
+                    if draft.auth_password.text.is_empty() {
+                        Style::default().fg(theme.comment)
+                    } else {
+                        Style::default().fg(theme.fg)
+                    },
+                ))
+            };
+            frame.render_widget(Paragraph::new(password_line).block(password_block), rows[3]);
+
+            if hint_row > 0 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " Tab move between fields   Esc close",
+                        Style::default().fg(theme.comment),
+                    )),
+                    rows[4],
+                );
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Bearer Token  — needs: label(1) + input(3) = 4
+        // -----------------------------------------------------------------
+        AuthType::BearerToken => {
+            if area.height < 3 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " ↕ Resize terminal to see fields",
+                        Style::default()
+                            .fg(theme.orange)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .alignment(Alignment::Center),
+                    area,
+                );
+                return;
+            }
+
+            let hint_row: u16 = if area.height >= 5 { 1 } else { 0 };
+            let input_h = area.height.saturating_sub(1 + hint_row).max(1); // 1 = label
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),        // label
+                    Constraint::Length(input_h),  // input
+                    Constraint::Length(hint_row), // hint
+                    Constraint::Min(0),
+                ])
+                .split(area);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Token",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                rows[0],
+            );
+
+            let token_focused = in_input_mode && is_field_focused;
+            let token_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(if token_focused {
+                    BorderType::Rounded
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(if token_focused {
+                    Style::default().fg(theme.yellow)
+                } else {
+                    Style::default().fg(Color::Indexed(238))
+                });
+            let token_line = if token_focused {
+                let len = draft.auth_token.text.len();
+                let cursor = draft.auth_token.cursor.min(len);
+                let before = &draft.auth_token.text[..cursor];
+                let after = &draft.auth_token.text[cursor..];
+                Line::from(vec![
+                    Span::raw(format!(" {}", before)),
+                    Span::styled(" ", Style::default().bg(Color::Indexed(238))),
+                    Span::raw(after.to_string()),
+                ])
+            } else {
+                let visible = if draft.auth_token.text.is_empty() {
+                    " token".to_string()
+                } else {
+                    format!(" {}", draft.auth_token.text)
+                };
+                Line::from(Span::styled(
+                    visible,
+                    if draft.auth_token.text.is_empty() {
+                        Style::default().fg(theme.comment)
+                    } else {
+                        Style::default().fg(theme.fg)
+                    },
+                ))
+            };
+            frame.render_widget(Paragraph::new(token_line).block(token_block), rows[1]);
+
+            if hint_row > 0 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " Esc close",
+                        Style::default().fg(theme.comment),
+                    )),
+                    rows[2],
+                );
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // API Key  — needs: label(1) + input(3) + label(1) + input(3) = 8
+        // -----------------------------------------------------------------
+        AuthType::ApiKey => {
+            if area.height < 5 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " ↕ Resize terminal to see fields",
+                        Style::default()
+                            .fg(theme.orange)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .alignment(Alignment::Center),
+                    area,
+                );
+                return;
+            }
+
+            let label_rows: u16 = 2;
+            let hint_row: u16 = if area.height >= 7 { 1 } else { 0 };
+            let input_space = area.height.saturating_sub(label_rows + hint_row);
+            let input1_h = (input_space / 2).max(1);
+            let input2_h = input_space.saturating_sub(input1_h).max(1);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),        // header name label
+                    Constraint::Length(input1_h), // header name input
+                    Constraint::Length(1),        // header value label
+                    Constraint::Length(input2_h), // header value input
+                    Constraint::Length(hint_row), // hint
+                    Constraint::Min(0),
+                ])
+                .split(area);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Header Name",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                rows[0],
+            );
+
+            let header_focused = in_input_mode && is_field_focused && draft.active_col == 0;
+            let header_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(if header_focused {
+                    BorderType::Rounded
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(if header_focused {
+                    Style::default().fg(theme.yellow)
+                } else {
+                    Style::default().fg(Color::Indexed(238))
+                });
+            let header_line = if header_focused {
+                let len = draft.auth_header_name.text.len();
+                let cursor = draft.auth_header_name.cursor.min(len);
+                let before = &draft.auth_header_name.text[..cursor];
+                let after = &draft.auth_header_name.text[cursor..];
+                Line::from(vec![
+                    Span::raw(format!(" {}", before)),
+                    Span::styled(" ", Style::default().bg(Color::Indexed(238))),
+                    Span::raw(after.to_string()),
+                ])
+            } else {
+                let visible = if draft.auth_header_name.text.is_empty() {
+                    " header name".to_string()
+                } else {
+                    format!(" {}", draft.auth_header_name.text)
+                };
+                Line::from(Span::styled(
+                    visible,
+                    if draft.auth_header_name.text.is_empty() {
+                        Style::default().fg(theme.comment)
+                    } else {
+                        Style::default().fg(theme.fg)
+                    },
+                ))
+            };
+            frame.render_widget(Paragraph::new(header_line).block(header_block), rows[1]);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Header Value",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                rows[2],
+            );
+
+            let value_focused = in_input_mode && is_field_focused && draft.active_col == 1;
+            let value_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(if value_focused {
+                    BorderType::Rounded
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(if value_focused {
+                    Style::default().fg(theme.yellow)
+                } else {
+                    Style::default().fg(Color::Indexed(238))
+                });
+            let value_line = if value_focused {
+                let len = draft.auth_header_value.text.len();
+                let cursor = draft.auth_header_value.cursor.min(len);
+                let before = &draft.auth_header_value.text[..cursor];
+                let after = &draft.auth_header_value.text[cursor..];
+                Line::from(vec![
+                    Span::raw(format!(" {}", before)),
+                    Span::styled(" ", Style::default().bg(Color::Indexed(238))),
+                    Span::raw(after.to_string()),
+                ])
+            } else {
+                let visible = if draft.auth_header_value.text.is_empty() {
+                    " header value".to_string()
+                } else {
+                    format!(" {}", draft.auth_header_value.text)
+                };
+                Line::from(Span::styled(
+                    visible,
+                    if draft.auth_header_value.text.is_empty() {
+                        Style::default().fg(theme.comment)
+                    } else {
+                        Style::default().fg(theme.fg)
+                    },
+                ))
+            };
+            frame.render_widget(Paragraph::new(value_line).block(value_block), rows[3]);
+
+            if hint_row > 0 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " Tab move between fields   Esc close",
+                        Style::default().fg(theme.comment),
+                    )),
+                    rows[4],
+                );
+            }
+        }
+
+        AuthType::None => {}
     }
 }
 
