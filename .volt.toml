@@ -1,4 +1,7 @@
 base_url = "http://localhost:3000"
-theme = "dracula"
 
-[drafts]
+[remote.local-docker]
+host = "localhost"
+user = "testuser"
+port = 2222
+identity = "/tmp/volt_test_key"

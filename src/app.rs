@@ -422,6 +422,7 @@ pub struct App {
     pub editor_tab: EditorTab,
     pub input_mode: bool,
     pub input_target: InputTarget,
+    pub show_heatmap: bool,
 
     pub pane_widths: [u16; 3],
     pub resize_target: ResizeTarget,
@@ -535,7 +536,6 @@ impl App {
         //     .expect("failed to build reqwest client");
 
         let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
         // Pre-populate drafts for custom routes that have a persisted base URL
         // so the correct URL is shown the moment the user selects them.
         let fallback_base = url_history
@@ -588,6 +588,7 @@ impl App {
             executor_name: None,
             resize_target: ResizeTarget::None,
             executor,
+            show_heatmap: false,
         }
     }
 
@@ -674,6 +675,25 @@ impl App {
         let Some(route) = self.current_route().cloned() else {
             return;
         };
+
+        let id = route.id();
+        for r in &mut self.routes {
+            if r.id() == id {
+                r.hit_count += 1;
+            }
+        }
+        for r in &mut self.filtered_routes {
+            if r.id() == id {
+                r.hit_count += 1;
+            }
+        }
+        // Save routes (including hit counts) to .volt_routes.json
+        scanner::save_custom_routes(
+            &self.working_dir,
+            &self.routes,
+            &self.custom_route_base_urls,
+        );
+
         self.pending_request = true;
         self.loader_tick = 0;
         self.viewer_scroll = 0;
@@ -1061,6 +1081,7 @@ impl App {
                 framework: "custom".into(),
                 source: std::path::PathBuf::from("custom"),
                 line: 0,
+                hit_count: 0,
             };
             let id = route.id();
             self.routes.push(route);

@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
     let mut global_config = config::GlobalConfig::load();
 
     if cli.themes {
-        let options = vec!["vesper", "dracula", "gruvbox", "tokyo-night"];
+        let options = vec!["vesper", "dracula", "gruvbox", "tokyo-night", "catppuccin"];
         let ans = inquire::Select::new("Select a theme:", options).prompt();
         match ans {
             Ok(choice) => {
@@ -254,6 +254,18 @@ async fn handle_update() -> anyhow::Result<()> {
 }
 
 async fn handle_key(app: &mut App, key: KeyEvent) {
+    if app.show_heatmap {
+        match key.code {
+            KeyCode::Char('h') | KeyCode::Esc => {
+                app.show_heatmap = false;
+                app.viewer_scroll = 0;
+            }
+            KeyCode::Char('j') | KeyCode::Down => app.scroll_viewer(false),
+            KeyCode::Char('k') | KeyCode::Up => app.scroll_viewer(true),
+            _ => {}
+        }
+        return;
+    }
     if app.view_picker_open {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => app.view_picker_open = false,
@@ -422,6 +434,10 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('d') if app.focus == FocusPane::Explorer => {
             app.delete_selected_custom_route()
+        }
+        KeyCode::Char('h') if app.focus == FocusPane::Explorer => {
+            app.show_heatmap = true;
+            app.viewer_scroll = 0;
         }
         KeyCode::Char('k') | KeyCode::Down if app.focus == FocusPane::Viewer => {
             app.scroll_viewer(false)

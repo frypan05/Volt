@@ -64,6 +64,16 @@ impl Theme {
                 blue: Color::Rgb(0x7a, 0xa2, 0xf7),
                 pink: Color::Rgb(0xbb, 0x9a, 0xfe),
             },
+            "catppuccin" => Self {
+                primary: Color::Rgb(0xa6, 0xe3, 0xa1),
+                fg: Color::Rgb(0xcd, 0xe6, 0xf6),
+                comment: Color::Rgb(0x6c, 0x70, 0x86),
+                orange: Color::Rgb(0xf5, 0xa9, 0x7f),
+                yellow: Color::Rgb(0xf9, 0xe2, 0xaf),
+                teal: Color::Rgb(0x94, 0xe2, 0xd5),
+                blue: Color::Rgb(0x89, 0xb4, 0xfa),
+                pink: Color::Rgb(0xf5, 0xc2, 0xe7),
+            },
             _ => Self {
                 // Vesper (Default)
                 primary: Color::Rgb(0x5c, 0xb8, 0xb2),
@@ -123,11 +133,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let res_01 = app.resize_target == crate::app::ResizeTarget::Split01;
     let res_12 = app.resize_target == crate::app::ResizeTarget::Split12;
 
+    // Draw the main panes — always draw all three, even when heatmap is open
     draw_explorer(frame, app, cols[0], theme, res_01);
     draw_editor(frame, app, cols[1], theme, res_01, res_12);
     draw_viewer(frame, app, cols[2], theme, res_12);
 
-    if app.url_history_open && app.url_history.len() > 1 {
+    // Draw overlays and popups
+    if app.show_heatmap {
+        draw_heatmap(frame, app, theme);
+    } else if app.url_history_open && app.url_history.len() > 1 {
         draw_url_history_dropdown(frame, app, cols[1], theme);
     }
     if app.custom_route_dialog.is_some() {
@@ -247,8 +261,133 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 }
 
 // ---------------------------------------------------------------------------
-// Explorer
+// Heatmap popup
 // ---------------------------------------------------------------------------
+
+fn draw_heatmap(frame: &mut Frame, app: &App, theme: Theme) {
+    let fa = frame.area();
+
+    // Calculate the number of rows: header + routes + 2 borders
+    let route_count = app.filtered_routes.len() as u16;
+    // popup height: 1 header row + route rows + 2 border rows, capped at 80% of screen
+    let content_rows = route_count.max(1);
+    let ideal_h = content_rows + 3; // 1 header + 2 borders
+    let max_h = (fa.height as f32 * 0.80) as u16;
+    let popup_h = ideal_h.min(max_h).max(6);
+
+    // popup width: METHOD(6) + space(1) + PATH(20) + space(1) + HITS(6) + borders(2) + padding
+    // roughly 40 chars of content + 2 borders = ~44, but give a bit more for readability
+    let popup_w: u16 = 48.min((fa.width as f32 * 0.80) as u16).max(40);
+
+    let x = (fa.width.saturating_sub(popup_w)) / 2;
+    let y = (fa.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Route Hitmap  (h to close, j/k to scroll) ",
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.teal))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    if app.filtered_routes.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No routes found.")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center),
+            inner,
+        );
+        return;
+    }
+
+    // Create header row
+    let header = Line::from(vec![
+        Span::styled(
+            format!("{:<6} ", "METHOD"),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<20} ", "PATH"),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "HITS",
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    // Create rows for each route — numbers only, no bars
+    let mut rows = vec![header];
+
+    for route in &app.filtered_routes {
+        let hits = route.hit_count;
+        let method_col = method_color(route.method.as_str(), theme);
+
+        let hits_color = if hits == 0 {
+            theme.comment
+        } else {
+            theme.yellow
+        };
+
+        rows.push(Line::from(vec![
+            Span::styled(
+                format!("{:<6} ", route.method.as_str()),
+                Style::default().fg(method_col),
+            ),
+            Span::styled(
+                format!("{:<20} ", truncate(&route.path, 19)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!("{:>5}", hits),
+                Style::default().fg(hits_color).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    let total = rows.len() as u16;
+    let visible = inner.height.saturating_sub(1); // 1 for header
+    let max_sc = total.saturating_sub(visible);
+    let scroll = app.viewer_scroll.min(max_sc);
+
+    // Split inner into header row and scrollable content
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)].as_ref())
+        .split(inner);
+
+    // Render header
+    frame.render_widget(Paragraph::new(rows[0].clone()), chunks[0]);
+
+    // Render content rows with scrolling
+    let content_rows_slice = &rows[1..];
+    frame.render_widget(
+        Paragraph::new(content_rows_slice.to_vec())
+            .scroll((scroll, 0))
+            .style(Style::default().fg(theme.fg)),
+        chunks[1],
+    );
+
+    // Scrollbar only when content overflows
+    if total > visible + 1 {
+        let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█")
+            .style(Style::default().fg(theme.teal));
+        let mut ss = ScrollbarState::new(max_sc as usize).position(scroll as usize);
+        frame.render_stateful_widget(sb, inner, &mut ss);
+    }
+}
 
 fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_right: bool) {
     let block = pane_block(
@@ -263,6 +402,38 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_rig
     if inner.height == 0 {
         return;
     }
+
+    // Create a layout with list and footer
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)].as_ref())
+        .split(inner);
+
+    let list_area = chunks[0];
+    let footer_area = chunks[1];
+
+    // Footer button - highlight when heatmap is active
+    let btn_style = if app.show_heatmap {
+        Style::default()
+            .fg(Color::Black)
+            .bg(theme.teal)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
+    };
+
+    let btn_text = if app.show_heatmap {
+        " Hit Rate View Active (h to close) "
+    } else {
+        " h  View Hit Rate "
+    };
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(btn_text, btn_style))
+            .alignment(Alignment::Center)
+            .bg(Color::Indexed(235)),
+        footer_area,
+    );
 
     let mut items: Vec<ListItem> = app
         .filtered_routes
@@ -315,7 +486,15 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_rig
     let list = List::new(items).highlight_style(Style::default().bg(Color::Indexed(237)));
     let mut state = ratatui::widgets::ListState::default();
     state.select(Some(app.selected_route));
-    frame.render_stateful_widget(list, inner, &mut state);
+    frame.render_stateful_widget(list, list_area, &mut state);
+}
+
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..max]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -719,6 +898,7 @@ fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect, theme: Them
 // ---------------------------------------------------------------------------
 
 fn draw_viewer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_left: bool) {
+    // Always draw the viewer — heatmap overlays on top of it
     let block = pane_block(
         " 3. RESPONSE ",
         app.focus == FocusPane::Viewer,
@@ -1404,8 +1584,6 @@ fn draw_auth_dialog_fields(
         // Basic Auth  — needs: label(1) + input(3) + label(1) + input(3) = 8
         // -----------------------------------------------------------------
         AuthType::BasicAuth => {
-            // Minimum usable height: both inputs visible (border-only = 2 each) + 2 labels = 6.
-            // Ideal: 9 rows. If we truly can't fit, show a resize nudge.
             if area.height < 5 {
                 frame.render_widget(
                     Paragraph::new(Span::styled(
@@ -1420,12 +1598,9 @@ fn draw_auth_dialog_fields(
                 return;
             }
 
-            // Distribute available rows: labels are fixed 1 row each;
-            // give remaining space equally to the two input boxes.
-            let label_rows: u16 = 2; // username label + password label
+            let label_rows: u16 = 2;
             let hint_row: u16 = if area.height >= 7 { 1 } else { 0 };
             let input_space = area.height.saturating_sub(label_rows + hint_row);
-            // Each input gets half (minimum 1 so the box border shows).
             let input1_h = (input_space / 2).max(1);
             let input2_h = input_space.saturating_sub(input1_h).max(1);
 
@@ -1571,7 +1746,7 @@ fn draw_auth_dialog_fields(
             }
 
             let hint_row: u16 = if area.height >= 5 { 1 } else { 0 };
-            let input_h = area.height.saturating_sub(1 + hint_row).max(1); // 1 = label
+            let input_h = area.height.saturating_sub(1 + hint_row).max(1);
 
             let rows = Layout::default()
                 .direction(Direction::Vertical)
