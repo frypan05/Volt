@@ -1,18 +1,3 @@
-After installation, the remote execution README section should focus only on:
-
-* configuring SSH
-* adding remote profiles
-* using `volt --remote`
-
-The important UX idea is:
-
-```txt id="k1j3m9"
-Volt already exists on both machines.
-Remote mode only changes WHERE requests execute.
-```
-
-So your README section should look more like this:
-
 ---
 
 # Remote Execution
