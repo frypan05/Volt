@@ -1,10 +1,10 @@
-use std::collections::BTreeSet;
-use std::fs;
-use std::path::{Path, PathBuf};
-
 use ignore::WalkBuilder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::app::HttpMethod;
 
@@ -15,6 +15,8 @@ pub struct RouteInfo {
     pub framework: String,
     pub source: PathBuf,
     pub line: usize,
+    #[serde(default)]
+    pub hit_count: u32,
 }
 
 impl RouteInfo {
@@ -147,13 +149,31 @@ pub fn scan_dir(root: &Path) -> anyhow::Result<ScannerReport> {
     }
 
     let mut persisted_base_urls = std::collections::HashMap::new();
+    let mut persisted_hit_counts = std::collections::HashMap::new();
+    let mut final_routes = BTreeSet::new();
+
+    // Load custom routes and extract hit counts
     for pr in load_persisted_routes(root) {
+        persisted_hit_counts.insert(pr.route.id(), pr.route.hit_count);
         persisted_base_urls.insert(pr.route.id(), pr.base_url);
-        routes.insert(pr.route);
+        final_routes.insert(pr.route);
+    }
+
+    // Apply hit counts to discovered routes
+    let routes_with_hits: Vec<RouteInfo> = routes
+        .into_iter()
+        .map(|mut r| {
+            r.hit_count = *persisted_hit_counts.get(&r.id()).unwrap_or(&0);
+            r
+        })
+        .collect();
+
+    for r in routes_with_hits {
+        final_routes.insert(r);
     }
 
     Ok(ScannerReport {
-        routes: routes.into_iter().collect(),
+        routes: final_routes.into_iter().collect(),
         persisted_base_urls,
         is_too_broad,
     })
@@ -212,6 +232,7 @@ fn extract_axum(path: &Path, content: &str) -> Vec<RouteInfo> {
                     framework: "axum".to_string(),
                     source: path.to_path_buf(),
                     line,
+                    hit_count: 0,
                 });
             }
         }
@@ -238,6 +259,7 @@ fn extract_actix(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: "actix-web".to_string(),
                 source: path.to_path_buf(),
                 line: line_number(content, captures.get(0).unwrap().start()),
+                hit_count: 0,
             });
         }
     }
@@ -249,6 +271,7 @@ fn extract_actix(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: "actix-web".to_string(),
                 source: path.to_path_buf(),
                 line: line_number(content, captures.get(0).unwrap().start()),
+                hit_count: 0,
             });
         }
     }
@@ -281,6 +304,7 @@ fn extract_express(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: framework.to_string(),
                 source: path.to_path_buf(),
                 line: line_number(content, captures.get(0).unwrap().start()),
+                hit_count: 0,
             });
         }
     }
@@ -304,6 +328,7 @@ fn extract_fastapi(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: "fastapi".to_string(),
                 source: path.to_path_buf(),
                 line: line_number(content, captures.get(0).unwrap().start()),
+                hit_count: 0,
             });
         }
     }
@@ -333,6 +358,7 @@ fn extract_nextjs(path: &Path, content: &str) -> Vec<RouteInfo> {
                         framework: "next.js".to_string(),
                         source: path.to_path_buf(),
                         line: line_number(content, cap.get(0).unwrap().start()),
+                        hit_count: 0,
                     });
                     found_methods = true;
                 }
@@ -344,6 +370,7 @@ fn extract_nextjs(path: &Path, content: &str) -> Vec<RouteInfo> {
                     framework: "next.js".to_string(),
                     source: path.to_path_buf(),
                     line: 1,
+                    hit_count: 0,
                 });
             }
         }
@@ -369,6 +396,7 @@ fn extract_nextjs(path: &Path, content: &str) -> Vec<RouteInfo> {
                         framework: "next.js".to_string(),
                         source: path.to_path_buf(),
                         line: line_number(content, cap.get(0).unwrap().start()),
+                        hit_count: 0,
                     });
                 }
             }
@@ -412,6 +440,7 @@ fn extract_nextjs(path: &Path, content: &str) -> Vec<RouteInfo> {
                                 framework: "next.js".to_string(),
                                 source: path.to_path_buf(),
                                 line: line_number(content, cap.get(0).unwrap().start()),
+                                hit_count: 0,
                             });
                             found = true;
                         }
@@ -423,6 +452,7 @@ fn extract_nextjs(path: &Path, content: &str) -> Vec<RouteInfo> {
                             framework: "next.js".to_string(),
                             source: path.to_path_buf(),
                             line: 1,
+                            hit_count: 0,
                         });
                     }
                 } else {
@@ -432,6 +462,7 @@ fn extract_nextjs(path: &Path, content: &str) -> Vec<RouteInfo> {
                         framework: "next.js".to_string(),
                         source: path.to_path_buf(),
                         line: 1,
+                        hit_count: 0,
                     });
                 }
             }
@@ -522,6 +553,7 @@ fn extract_react_router(path: &Path, content: &str) -> Vec<RouteInfo> {
             framework: "react-router".to_string(),
             source: path.to_path_buf(),
             line: line_number(content, cap.get(0).unwrap().start()),
+            hit_count: 0,
         });
     }
 
@@ -539,6 +571,7 @@ fn extract_react_router(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: "react-router".to_string(),
                 source: path.to_path_buf(),
                 line: line_number(content, factory_match.start() + cap.get(0).unwrap().start()),
+                hit_count: 0,
             });
         }
     }
@@ -575,6 +608,7 @@ fn extract_vue_router(path: &Path, content: &str) -> Vec<RouteInfo> {
             framework: "vue-router".to_string(),
             source: path.to_path_buf(),
             line: line_number(content, anchor.start() + cap.get(0).unwrap().start()),
+            hit_count: 0,
         });
     }
 
@@ -599,6 +633,7 @@ fn extract_svelte_kit(path: &Path, content: &str) -> Vec<RouteInfo> {
             framework: "sveltekit".to_string(),
             source: path.to_path_buf(),
             line: 1,
+            hit_count: 0,
         });
     } else if matches!(filename, "+server.ts" | "+server.js") {
         let method_re = Regex::new(
@@ -615,6 +650,7 @@ fn extract_svelte_kit(path: &Path, content: &str) -> Vec<RouteInfo> {
                     framework: "sveltekit".to_string(),
                     source: path.to_path_buf(),
                     line: line_number(content, cap.get(0).unwrap().start()),
+                    hit_count: 0,
                 });
             }
         }
@@ -692,6 +728,7 @@ fn extract_angular(path: &Path, content: &str) -> Vec<RouteInfo> {
             framework: "angular".to_string(),
             source: path.to_path_buf(),
             line: line_number(content, anchor.start() + cap.get(0).unwrap().start()),
+            hit_count: 0,
         });
     }
 
@@ -740,6 +777,7 @@ fn extract_gin(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: "gin".to_string(),
                 source: path.to_path_buf(),
                 line: line_number(content, cap.get(0).unwrap().start()),
+                hit_count: 0,
             });
         }
     }
@@ -786,6 +824,7 @@ fn extract_spring(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: "spring".to_string(),
                 source: path.to_path_buf(),
                 line: line_number(content, cap.get(0).unwrap().start()),
+                hit_count: 0,
             });
         }
     }
@@ -811,6 +850,7 @@ fn extract_spring(path: &Path, content: &str) -> Vec<RouteInfo> {
                     framework: "spring".to_string(),
                     source: path.to_path_buf(),
                     line: line_number(content, cap.get(0).unwrap().start()),
+                    hit_count: 0,
                 });
             }
         } else {
@@ -821,6 +861,7 @@ fn extract_spring(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: "spring".to_string(),
                 source: path.to_path_buf(),
                 line: line_number(content, cap.get(0).unwrap().start()),
+                hit_count: 0,
             });
         }
     }
@@ -845,6 +886,7 @@ fn extract_spring(path: &Path, content: &str) -> Vec<RouteInfo> {
                     framework: "spring".to_string(),
                     source: path.to_path_buf(),
                     line: line_number(content, path_cap.get(0).unwrap().start()),
+                    hit_count: 0,
                 });
             }
         }
@@ -896,6 +938,7 @@ fn extract_django(path: &Path, content: &str) -> Vec<RouteInfo> {
             framework: "django".to_string(),
             source: path.to_path_buf(),
             line: line_number(content, cap.get(0).unwrap().start()),
+            hit_count: 0,
         });
     }
 
@@ -910,6 +953,7 @@ fn extract_django(path: &Path, content: &str) -> Vec<RouteInfo> {
             framework: "django".to_string(),
             source: path.to_path_buf(),
             line: line_number(content, cap.get(0).unwrap().start()),
+            hit_count: 0,
         });
     }
 
@@ -1001,6 +1045,7 @@ fn extract_flask(path: &Path, content: &str) -> Vec<RouteInfo> {
                         framework: "flask".to_string(),
                         source: path.to_path_buf(),
                         line,
+                        hit_count: 0,
                     });
                     found = true;
                 }
@@ -1013,6 +1058,7 @@ fn extract_flask(path: &Path, content: &str) -> Vec<RouteInfo> {
                     framework: "flask".to_string(),
                     source: path.to_path_buf(),
                     line,
+                    hit_count: 0,
                 });
             }
         } else {
@@ -1023,6 +1069,7 @@ fn extract_flask(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: "flask".to_string(),
                 source: path.to_path_buf(),
                 line,
+                hit_count: 0,
             });
         }
     }
@@ -1074,6 +1121,7 @@ fn extract_nuxt(path: &Path, content: &str) -> Vec<RouteInfo> {
             framework: "nuxt".to_string(),
             source: path.to_path_buf(),
             line: 1,
+            hit_count: 0,
         }]
     } else {
         Vec::new()
@@ -1221,6 +1269,7 @@ fn extract_aspnet(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: "aspnet".to_string(),
                 source: path.to_path_buf(),
                 line: line_number(content, cap.get(0).unwrap().start()),
+                hit_count: 0,
             });
         }
     }
@@ -1240,6 +1289,7 @@ fn extract_aspnet(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: "aspnet".to_string(),
                 source: path.to_path_buf(),
                 line: line_number(content, cap.get(0).unwrap().start()),
+                hit_count: 0,
             });
         }
     }
@@ -1276,6 +1326,7 @@ fn extract_aspnet(path: &Path, content: &str) -> Vec<RouteInfo> {
                 framework: "aspnet".to_string(),
                 source: path.to_path_buf(),
                 line: line_number(content, offset),
+                hit_count: 0,
             });
         }
     }
@@ -1361,6 +1412,7 @@ fn extract_azurefunction(path: &Path, content: &str) -> Vec<RouteInfo> {
                     framework: "azurefunction".to_string(),
                     source: path.to_path_buf(),
                     line: line_number(content, offset),
+                    hit_count: 0,
                 });
             }
         }
@@ -1408,31 +1460,21 @@ mod tests {
             routes.extend(extract_routes(&path, &content));
         }
 
-        assert!(
-            routes
-                .iter()
-                .any(|route| route.framework == "axum" && route.path == "/v1/login")
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|route| route.framework == "actix-web" && route.path == "/health")
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|route| route.framework == "express" && route.path == "/users/:id")
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|route| route.framework == "fastify" && route.path == "/teams")
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|route| route.framework == "fastapi" && route.path == "/items")
-        );
+        assert!(routes
+            .iter()
+            .any(|route| route.framework == "axum" && route.path == "/v1/login"));
+        assert!(routes
+            .iter()
+            .any(|route| route.framework == "actix-web" && route.path == "/health"));
+        assert!(routes
+            .iter()
+            .any(|route| route.framework == "express" && route.path == "/users/:id"));
+        assert!(routes
+            .iter()
+            .any(|route| route.framework == "fastify" && route.path == "/teams"));
+        assert!(routes
+            .iter()
+            .any(|route| route.framework == "fastapi" && route.path == "/items"));
     }
 
     // Unit tests for new extractors — these run against inline content so
@@ -1452,21 +1494,15 @@ func main() {
 }
 "#;
         let routes = extract_gin(&path, content);
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users" && r.method == HttpMethod::Get)
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users" && r.method == HttpMethod::Post)
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users/:id" && r.method == HttpMethod::Delete)
-        );
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users" && r.method == HttpMethod::Get));
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users" && r.method == HttpMethod::Post));
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users/:id" && r.method == HttpMethod::Delete));
     }
 
     #[test]
@@ -1486,21 +1522,15 @@ public class UserController {
 }
 "#;
         let routes = extract_spring(&path, content);
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users" && r.method == HttpMethod::Get)
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users" && r.method == HttpMethod::Post)
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users/{id}" && r.method == HttpMethod::Delete)
-        );
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users" && r.method == HttpMethod::Get));
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users" && r.method == HttpMethod::Post));
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users/{id}" && r.method == HttpMethod::Delete));
     }
 
     #[test]
@@ -1537,26 +1567,18 @@ def users(): pass
 def delete_user(id): pass
 "#;
         let routes = extract_flask(&path, content);
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/" && r.method == HttpMethod::Get)
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users" && r.method == HttpMethod::Get)
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users" && r.method == HttpMethod::Post)
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users/<id>" && r.method == HttpMethod::Delete)
-        );
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/" && r.method == HttpMethod::Get));
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users" && r.method == HttpMethod::Get));
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users" && r.method == HttpMethod::Post));
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users/<id>" && r.method == HttpMethod::Delete));
     }
 
     #[test]
@@ -1569,20 +1591,14 @@ app.MapPost("/users", (User u) => Results.Created());
 app.MapDelete("/users/{id}", (int id) => Results.NoContent());
 "#;
         let routes = extract_aspnet(&path, content);
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users" && r.method == HttpMethod::Get)
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users" && r.method == HttpMethod::Post)
-        );
-        assert!(
-            routes
-                .iter()
-                .any(|r| r.path == "/users/:id" && r.method == HttpMethod::Delete)
-        );
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users" && r.method == HttpMethod::Get));
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users" && r.method == HttpMethod::Post));
+        assert!(routes
+            .iter()
+            .any(|r| r.path == "/users/:id" && r.method == HttpMethod::Delete));
     }
 }

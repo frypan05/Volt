@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::time::Duration;
+use std::sync::Arc;
+// use std::time::Duration;
 
 use arboard::Clipboard;
 use ratatui::style::{Color, Style};
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
+use crate::executor::Executor;
 use crate::http::{self, HttpResult};
 use crate::scanner::{self, RouteInfo, ScannerReport};
 use crate::ui::highlight::{self, ResponseView};
@@ -124,6 +126,41 @@ impl EditorTab {
 pub enum InputTarget {
     BaseUrl,
     Tab(EditorTab),
+}
+
+// ---------------------------------------------------------------------------
+// AuthType
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthType {
+    None,
+    BasicAuth,
+    BearerToken,
+    ApiKey,
+}
+
+impl AuthType {
+    pub const ALL: [AuthType; 4] = [Self::None, Self::BasicAuth, Self::BearerToken, Self::ApiKey];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::BasicAuth => "Basic Auth",
+            Self::BearerToken => "Bearer Token",
+            Self::ApiKey => "API Key",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let i = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +305,12 @@ pub struct RequestDraft {
     pub body: TextBuffer,
     pub body_type: BodyType,
     pub params: Vec<KVRow>,
-    pub auth: Vec<KVRow>,
+    pub auth_type: AuthType,
+    pub auth_username: TextBuffer,
+    pub auth_password: TextBuffer,
+    pub auth_token: TextBuffer,
+    pub auth_header_name: TextBuffer,
+    pub auth_header_value: TextBuffer,
     pub active_row: usize,
     pub active_col: usize,
 }
@@ -281,7 +323,12 @@ impl RequestDraft {
             body: TextBuffer::default(),
             body_type: BodyType::None,
             params: vec![KVRow::new()],
-            auth: vec![KVRow::new()],
+            auth_type: AuthType::None,
+            auth_username: TextBuffer::default(),
+            auth_password: TextBuffer::default(),
+            auth_token: TextBuffer::default(),
+            auth_header_name: TextBuffer::default(),
+            auth_header_value: TextBuffer::default(),
             active_row: 0,
             active_col: 0,
         }
@@ -291,11 +338,14 @@ impl RequestDraft {
         match target {
             InputTarget::BaseUrl => &mut self.base_url,
             InputTarget::Tab(EditorTab::Body) => &mut self.body,
+            InputTarget::Tab(EditorTab::Auth) => {
+                panic!("Use current_auth_buffer_mut instead")
+            }
             InputTarget::Tab(tab) => {
                 let rows = match tab {
                     EditorTab::Headers => &mut self.headers,
                     EditorTab::Params => &mut self.params,
-                    EditorTab::Auth => &mut self.auth,
+                    EditorTab::Auth => unreachable!(),
                     EditorTab::Body => unreachable!(),
                 };
                 while rows.len() <= self.active_row {
@@ -314,13 +364,13 @@ impl RequestDraft {
         match tab {
             EditorTab::Headers => self.headers.push(KVRow::new()),
             EditorTab::Params => self.params.push(KVRow::new()),
-            EditorTab::Auth => self.auth.push(KVRow::new()),
+            EditorTab::Auth => return,
             EditorTab::Body => return,
         }
         let len = match tab {
             EditorTab::Headers => self.headers.len(),
             EditorTab::Params => self.params.len(),
-            EditorTab::Auth => self.auth.len(),
+            EditorTab::Auth => return,
             EditorTab::Body => return,
         };
         self.active_row = len - 1;
@@ -372,9 +422,13 @@ pub struct App {
     pub editor_tab: EditorTab,
     pub input_mode: bool,
     pub input_target: InputTarget,
+    pub show_heatmap: bool,
 
     pub pane_widths: [u16; 3],
     pub resize_target: ResizeTarget,
+
+    /// True when the user is in the auth-type selector (←/→ changes auth type).
+    /// Esc from here or Tab to input fields.
 
     /// True when the user is in the body-type selector row (←/→ changes type).
     /// Esc from here returns to the Auth tab (one tab to the left of Body).
@@ -398,9 +452,9 @@ pub struct App {
     pub clipboard: Option<Clipboard>,
     pub msg_tx: mpsc::UnboundedSender<AppMsg>,
     pub custom_route_dialog: Option<CustomRouteDialog>,
+    pub auth_dialog: Option<AuthDialog>,
     pub last_area: ratatui::layout::Rect,
-    pub http_client: reqwest::Client,
-
+    // pub http_client: reqwest::Client,
     /// The working directory Volt was launched from.  Used to read/write the
     /// persisted custom-routes file.
     pub working_dir: std::path::PathBuf,
@@ -415,6 +469,15 @@ pub struct App {
 
     /// The selected theme name.
     pub theme: String,
+
+    /// The name of the current executor (e.g., "Local" or "SSH:prod@bastion.com")
+    /// This is set during initialization based on CLI flags
+    pub executor_name: Option<String>,
+
+    /// The executor responsible for running HTTP requests.
+    /// Can be either LocalExecutor (runs requests locally)
+    /// or RemoteExecutor (runs requests on a remote machine).
+    pub executor: Arc<dyn Executor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,12 +493,29 @@ pub struct CustomRouteDialog {
     pub active_field: CustomRouteField,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthDialogField {
+    TypeSelector,
+    InputFields,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthDialog {
+    pub active_field: AuthDialogField,
+}
+
 impl App {
+    pub fn open_auth_dialog(&mut self) {
+        self.auth_dialog = Some(AuthDialog {
+            active_field: AuthDialogField::TypeSelector,
+        });
+    }
     pub fn new(
         report: ScannerReport,
         config: AppConfig,
         global_config: crate::config::GlobalConfig,
         msg_tx: mpsc::UnboundedSender<AppMsg>,
+        executor: Arc<dyn Executor>,
     ) -> Self {
         let routes = report.routes.clone();
         let _ = dotenvy::dotenv();
@@ -447,16 +527,15 @@ impl App {
             url_history.insert(0, config.base_url.clone());
         }
 
-        let http_client = reqwest::Client::builder()
-            .tcp_nodelay(true)
-            .pool_max_idle_per_host(8)
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .expect("failed to build reqwest client");
+        // let http_client = reqwest::Client::builder()
+        //     .tcp_nodelay(true)
+        //     .pool_max_idle_per_host(8)
+        //     .timeout(Duration::from_secs(30))
+        //     .connect_timeout(Duration::from_secs(10))
+        //     .build()
+        //     .expect("failed to build reqwest client");
 
         let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
         // Pre-populate drafts for custom routes that have a persisted base URL
         // so the correct URL is shown the moment the user selects them.
         let fallback_base = url_history
@@ -499,13 +578,17 @@ impl App {
             clipboard: Clipboard::new().ok(),
             msg_tx,
             custom_route_dialog: None,
+            auth_dialog: None,
             last_area: ratatui::layout::Rect::default(),
-            http_client,
+            // http_client,
             working_dir,
             custom_route_base_urls: report.persisted_base_urls,
             is_too_broad: report.is_too_broad,
             theme: global_config.theme,
+            executor_name: None,
             resize_target: ResizeTarget::None,
+            executor,
+            show_heatmap: false,
         }
     }
 
@@ -592,6 +675,25 @@ impl App {
         let Some(route) = self.current_route().cloned() else {
             return;
         };
+
+        let id = route.id();
+        for r in &mut self.routes {
+            if r.id() == id {
+                r.hit_count += 1;
+            }
+        }
+        for r in &mut self.filtered_routes {
+            if r.id() == id {
+                r.hit_count += 1;
+            }
+        }
+        // Save routes (including hit counts) to .volt_routes.json
+        scanner::save_custom_routes(
+            &self.working_dir,
+            &self.routes,
+            &self.custom_route_base_urls,
+        );
+
         self.pending_request = true;
         self.loader_tick = 0;
         self.viewer_scroll = 0;
@@ -602,10 +704,10 @@ impl App {
 
         let draft = self.current_draft();
         let tx = self.msg_tx.clone();
-        let client = self.http_client.clone();
+        let executor = self.executor.clone();
 
         tokio::spawn(async move {
-            let result = http::execute(client, route, draft).await;
+            let result = http::execute(&*executor, route, draft).await;
             let _ = tx.send(AppMsg::RawResult(result));
         });
     }
@@ -739,7 +841,7 @@ impl App {
                             let rows = match tab {
                                 EditorTab::Headers => &mut draft.headers,
                                 EditorTab::Params => &mut draft.params,
-                                EditorTab::Auth => &mut draft.auth,
+                                EditorTab::Auth => return,
                                 EditorTab::Body => return,
                             };
                             if let Some(r) = rows.get_mut(dr) {
@@ -824,7 +926,32 @@ impl App {
         })
     }
 
+    pub fn current_auth_buffer_mut(&mut self) -> &mut TextBuffer {
+        let draft = self.current_draft_mut();
+        match draft.auth_type {
+            AuthType::None => panic!("Cannot edit None auth type"),
+            AuthType::BasicAuth => {
+                if draft.active_col == 0 {
+                    &mut draft.auth_username
+                } else {
+                    &mut draft.auth_password
+                }
+            }
+            AuthType::BearerToken => &mut draft.auth_token,
+            AuthType::ApiKey => {
+                if draft.active_col == 0 {
+                    &mut draft.auth_header_name
+                } else {
+                    &mut draft.auth_header_value
+                }
+            }
+        }
+    }
+
     pub fn active_buffer_mut(&mut self) -> &mut TextBuffer {
+        if let InputTarget::Tab(EditorTab::Auth) = self.input_target {
+            return self.current_auth_buffer_mut();
+        }
         let t = self.input_target;
         self.current_draft_mut().active_buffer_mut(t)
     }
@@ -860,11 +987,7 @@ impl App {
                         d.params.push(KVRow::new());
                     }
                 }
-                EditorTab::Auth => {
-                    while d.auth.len() <= d.active_row {
-                        d.auth.push(KVRow::new());
-                    }
-                }
+                EditorTab::Auth => return,
                 _ => {}
             }
         }
@@ -958,6 +1081,7 @@ impl App {
                 framework: "custom".into(),
                 source: std::path::PathBuf::from("custom"),
                 line: 0,
+                hit_count: 0,
             };
             let id = route.id();
             self.routes.push(route);

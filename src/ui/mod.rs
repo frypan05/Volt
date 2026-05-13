@@ -1,6 +1,5 @@
 pub mod highlight;
 
-use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -8,9 +7,12 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Tabs, Wrap,
 };
+use ratatui::Frame;
 
-use crate::VERSION;
-use crate::app::{App, BodyType, CustomRouteField, EditorTab, FocusPane, HttpMethod, InputTarget};
+use crate::app::{
+    App, AuthDialogField, AuthType, BodyType, CustomRouteField, EditorTab, FocusPane, HttpMethod,
+    InputTarget,
+};
 use crate::ui::highlight::ResponseView;
 
 // ---------------------------------------------------------------------------
@@ -61,6 +63,16 @@ impl Theme {
                 teal: Color::Rgb(0x73, 0xdc, 0xad),
                 blue: Color::Rgb(0x7a, 0xa2, 0xf7),
                 pink: Color::Rgb(0xbb, 0x9a, 0xfe),
+            },
+            "catppuccin" => Self {
+                primary: Color::Rgb(0xa6, 0xe3, 0xa1),
+                fg: Color::Rgb(0xcd, 0xe6, 0xf6),
+                comment: Color::Rgb(0x6c, 0x70, 0x86),
+                orange: Color::Rgb(0xf5, 0xa9, 0x7f),
+                yellow: Color::Rgb(0xf9, 0xe2, 0xaf),
+                teal: Color::Rgb(0x94, 0xe2, 0xd5),
+                blue: Color::Rgb(0x89, 0xb4, 0xfa),
+                pink: Color::Rgb(0xf5, 0xc2, 0xe7),
             },
             _ => Self {
                 // Vesper (Default)
@@ -121,15 +133,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let res_01 = app.resize_target == crate::app::ResizeTarget::Split01;
     let res_12 = app.resize_target == crate::app::ResizeTarget::Split12;
 
+    // Draw the main panes — always draw all three, even when heatmap is open
     draw_explorer(frame, app, cols[0], theme, res_01);
     draw_editor(frame, app, cols[1], theme, res_01, res_12);
     draw_viewer(frame, app, cols[2], theme, res_12);
 
-    if app.url_history_open && app.url_history.len() > 1 {
+    // Draw overlays and popups
+    if app.show_heatmap {
+        draw_heatmap(frame, app, theme);
+    } else if app.url_history_open && app.url_history.len() > 1 {
         draw_url_history_dropdown(frame, app, cols[1], theme);
     }
     if app.custom_route_dialog.is_some() {
         draw_custom_route_dialog(frame, app, theme);
+    }
+    if app.auth_dialog.is_some() {
+        draw_auth_dialog(frame, app, theme);
     }
     if app.pending_request {
         draw_loader(frame, app, cols[2], theme);
@@ -168,13 +187,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
-    // Right-side content: "Donate  v{VERSION}"
-    // Compute width: leading space + "Donate" + double-space + "v" + version + trailing space
-    let version_str = format!(" Donate  v{} ", VERSION);
+    let version_str = format!(" Donate  v{} ", env!("CARGO_PKG_VERSION"));
     let right_w = version_str.len() as u16;
 
-    // Split the footer row: left gets keybindings, right gets donate+version.
-    // Guard against terminals so narrow the right panel would not fit.
     let (left_area, right_area) = if area.width > right_w + 20 {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -185,7 +200,6 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
         (area, None)
     };
 
-    // Left: existing keybindings (unchanged)
     let key = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
     let extra = if app.body_type_focused {
         Span::styled(
@@ -219,23 +233,22 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
         Span::raw("copy response "),
         Span::raw(" | "),
         Span::raw(&app.status_message),
+        Span::raw(format!(
+            " | Executor: {}",
+            app.executor_name.as_deref().unwrap_or("Local")
+        )),
         extra,
     ]);
     frame.render_widget(Paragraph::new(left_text).bg(Color::Indexed(234)), left_area);
 
-    // Right: Donate  vX.Y.Z — styled to match the UI palette
     if let Some(r) = right_area {
         let right_line = Line::from(vec![
             Span::raw(" "),
-            // Span::styled(
-            //     "Donate",
-            //     Style::default()
-            //         .fg(theme.teal)
-            //         .add_modifier(Modifier::BOLD)
-            //         .add_modifier(Modifier::UNDERLINED),
-            // ),
             Span::styled("  ", Style::default().fg(theme.comment)),
-            Span::styled(format!("v{}", VERSION), Style::default().fg(theme.comment)),
+            Span::styled(
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(theme.comment),
+            ),
             Span::raw(" "),
         ]);
         frame.render_widget(
@@ -248,8 +261,133 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
 }
 
 // ---------------------------------------------------------------------------
-// Explorer
+// Heatmap popup
 // ---------------------------------------------------------------------------
+
+fn draw_heatmap(frame: &mut Frame, app: &App, theme: Theme) {
+    let fa = frame.area();
+
+    // Calculate the number of rows: header + routes + 2 borders
+    let route_count = app.filtered_routes.len() as u16;
+    // popup height: 1 header row + route rows + 2 border rows, capped at 80% of screen
+    let content_rows = route_count.max(1);
+    let ideal_h = content_rows + 3; // 1 header + 2 borders
+    let max_h = (fa.height as f32 * 0.80) as u16;
+    let popup_h = ideal_h.min(max_h).max(6);
+
+    // popup width: METHOD(6) + space(1) + PATH(20) + space(1) + HITS(6) + borders(2) + padding
+    // roughly 40 chars of content + 2 borders = ~44, but give a bit more for readability
+    let popup_w: u16 = 48.min((fa.width as f32 * 0.80) as u16).max(40);
+
+    let x = (fa.width.saturating_sub(popup_w)) / 2;
+    let y = (fa.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Route Hitmap  (h to close, j/k to scroll) ",
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.teal))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    if app.filtered_routes.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No routes found.")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center),
+            inner,
+        );
+        return;
+    }
+
+    // Create header row
+    let header = Line::from(vec![
+        Span::styled(
+            format!("{:<6} ", "METHOD"),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<20} ", "PATH"),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "HITS",
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    // Create rows for each route — numbers only, no bars
+    let mut rows = vec![header];
+
+    for route in &app.filtered_routes {
+        let hits = route.hit_count;
+        let method_col = method_color(route.method.as_str(), theme);
+
+        let hits_color = if hits == 0 {
+            theme.comment
+        } else {
+            theme.yellow
+        };
+
+        rows.push(Line::from(vec![
+            Span::styled(
+                format!("{:<6} ", route.method.as_str()),
+                Style::default().fg(method_col),
+            ),
+            Span::styled(
+                format!("{:<20} ", truncate(&route.path, 19)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!("{:>5}", hits),
+                Style::default().fg(hits_color).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    let total = rows.len() as u16;
+    let visible = inner.height.saturating_sub(1); // 1 for header
+    let max_sc = total.saturating_sub(visible);
+    let scroll = app.viewer_scroll.min(max_sc);
+
+    // Split inner into header row and scrollable content
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)].as_ref())
+        .split(inner);
+
+    // Render header
+    frame.render_widget(Paragraph::new(rows[0].clone()), chunks[0]);
+
+    // Render content rows with scrolling
+    let content_rows_slice = &rows[1..];
+    frame.render_widget(
+        Paragraph::new(content_rows_slice.to_vec())
+            .scroll((scroll, 0))
+            .style(Style::default().fg(theme.fg)),
+        chunks[1],
+    );
+
+    // Scrollbar only when content overflows
+    if total > visible + 1 {
+        let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█")
+            .style(Style::default().fg(theme.teal));
+        let mut ss = ScrollbarState::new(max_sc as usize).position(scroll as usize);
+        frame.render_stateful_widget(sb, inner, &mut ss);
+    }
+}
 
 fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_right: bool) {
     let block = pane_block(
@@ -264,6 +402,38 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_rig
     if inner.height == 0 {
         return;
     }
+
+    // Create a layout with list and footer
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)].as_ref())
+        .split(inner);
+
+    let list_area = chunks[0];
+    let footer_area = chunks[1];
+
+    // Footer button - highlight when heatmap is active
+    let btn_style = if app.show_heatmap {
+        Style::default()
+            .fg(Color::Black)
+            .bg(theme.teal)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
+    };
+
+    let btn_text = if app.show_heatmap {
+        " Hit Rate View Active (h to close) "
+    } else {
+        " h  View Hit Rate "
+    };
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(btn_text, btn_style))
+            .alignment(Alignment::Center)
+            .bg(Color::Indexed(235)),
+        footer_area,
+    );
 
     let mut items: Vec<ListItem> = app
         .filtered_routes
@@ -316,7 +486,15 @@ fn draw_explorer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_rig
     let list = List::new(items).highlight_style(Style::default().bg(Color::Indexed(237)));
     let mut state = ratatui::widgets::ListState::default();
     state.select(Some(app.selected_route));
-    frame.render_stateful_widget(list, inner, &mut state);
+    frame.render_stateful_widget(list, list_area, &mut state);
+}
+
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..max]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -428,10 +606,63 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     }
     let draft = app.current_draft();
     let tab = app.editor_tab;
+
+    // -----------------------------------------------------------------------
+    // Auth tab: show status + open-dialog hint
+    // -----------------------------------------------------------------------
+    if tab == EditorTab::Auth {
+        let mut configured: Vec<&str> = Vec::new();
+        if !draft.auth_username.text.is_empty() || !draft.auth_password.text.is_empty() {
+            configured.push("Basic Auth");
+        }
+        if !draft.auth_token.text.is_empty() {
+            configured.push("Bearer Token");
+        }
+        if !draft.auth_header_name.text.is_empty() || !draft.auth_header_value.text.is_empty() {
+            configured.push("API Key");
+        }
+
+        let total_lines = 1 + configured.len() as u16;
+        let pad_top = area.height.saturating_sub(total_lines) / 2;
+
+        let mut constraints = vec![Constraint::Length(pad_top), Constraint::Length(1)];
+        for _ in &configured {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Min(0));
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+
+        frame.render_widget(
+            Paragraph::new("Press 'i' to open authentication dialog")
+                .style(Style::default().fg(theme.comment))
+                .alignment(Alignment::Center),
+            chunks[1],
+        );
+
+        for (i, label) in configured.iter().enumerate() {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("Auth set: ", Style::default().fg(theme.comment)),
+                    Span::styled(
+                        *label,
+                        Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                    ),
+                ]))
+                .alignment(Alignment::Center),
+                chunks[2 + i],
+            );
+        }
+        return;
+    }
+
     let rows = match tab {
         EditorTab::Headers => &draft.headers,
         EditorTab::Params => &draft.params,
-        EditorTab::Auth => &draft.auth,
+        EditorTab::Auth => unreachable!(),
         EditorTab::Body => return,
     };
     let tbl_h = area.height.saturating_sub(1);
@@ -540,7 +771,7 @@ fn draw_kv_table(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
     let btn_label = match tab {
         EditorTab::Headers => " + Add header",
         EditorTab::Params => " + Add param",
-        EditorTab::Auth => " + Add auth entry",
+        EditorTab::Auth => unreachable!(),
         _ => "",
     };
     frame.render_widget(
@@ -667,6 +898,7 @@ fn draw_body_type_selector(frame: &mut Frame, app: &App, area: Rect, theme: Them
 // ---------------------------------------------------------------------------
 
 fn draw_viewer(frame: &mut Frame, app: &App, area: Rect, theme: Theme, res_left: bool) {
+    // Always draw the viewer — heatmap overlays on top of it
     let block = pane_block(
         " 3. RESPONSE ",
         app.focus == FocusPane::Viewer,
@@ -1168,6 +1400,573 @@ fn draw_custom_route_dialog(frame: &mut Frame, app: &App, theme: Theme) {
             ])),
             rows[5],
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auth dialog
+// ---------------------------------------------------------------------------
+
+fn draw_auth_dialog(frame: &mut Frame, app: &App, theme: Theme) {
+    let Some(dialog) = &app.auth_dialog else {
+        return;
+    };
+
+    let fa = frame.area();
+    let px = if fa.width < 60 { 95u16 } else { 70 };
+    let py = if fa.height < 20 { 90u16 } else { 50 };
+    let area = centered_rect(px, py, fa);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Authentication ")
+        .border_style(Style::default().fg(theme.teal).add_modifier(Modifier::BOLD));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+    if inner.height < 4 {
+        return;
+    }
+
+    let draft = app.current_draft();
+    let is_type_focused = dialog.active_field == AuthDialogField::TypeSelector;
+
+    let av = inner.height;
+    let ml = if av >= 2 { 1u16 } else { 0 };
+    let mp = if av >= ml + 3 { 3u16 } else { 0 };
+    let g1 = if av > ml + mp { 1u16 } else { 0 };
+    let pl = if av > ml + mp + g1 { 1u16 } else { 0 };
+    let fixed_rows = ml + mp + g1 + pl;
+    let ht = if av > fixed_rows + 1 { 1u16 } else { 0 };
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(ml),
+            Constraint::Length(mp),
+            Constraint::Length(g1),
+            Constraint::Length(pl),
+            Constraint::Min(0), // input fields: expands to fill all remaining space
+            Constraint::Length(ht), // keybinding hint: pinned to 1 row
+        ])
+        .split(inner);
+
+    if ml > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " Auth Type  (← / → to select, Tab to move to inputs)",
+                if is_type_focused {
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.comment)
+                },
+            )),
+            rows[0],
+        );
+    }
+
+    if mp > 0 {
+        let mb = Block::default()
+            .borders(Borders::ALL)
+            .border_type(if is_type_focused {
+                BorderType::Rounded
+            } else {
+                BorderType::Plain
+            })
+            .border_style(if is_type_focused {
+                Style::default().fg(theme.teal)
+            } else {
+                Style::default().fg(Color::Indexed(238))
+            });
+        let pill_inner = mb.inner(rows[1]);
+        frame.render_widget(mb, rows[1]);
+        let mc = AuthType::ALL.len() as u32;
+        let pc = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(
+                (0..mc)
+                    .map(|_| Constraint::Ratio(1, mc))
+                    .collect::<Vec<_>>(),
+            )
+            .split(pill_inner);
+        for (i, t) in AuthType::ALL.iter().enumerate() {
+            let is_sel = *t == draft.auth_type;
+            let (bg, fg, mo) = if is_sel {
+                (
+                    method_pill_color(t.label(), theme),
+                    Color::Black,
+                    Modifier::BOLD,
+                )
+            } else {
+                (Color::Indexed(236), theme.comment, Modifier::empty())
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" {} ", t.label()),
+                    Style::default().fg(fg).add_modifier(mo),
+                ))
+                .bg(bg)
+                .alignment(Alignment::Center),
+                pc[i],
+            );
+        }
+    }
+
+    if pl > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " Type a credential below when a mode is selected",
+                Style::default().fg(theme.comment),
+            )),
+            rows[3],
+        );
+    }
+
+    if rows[4].height > 0 {
+        if draft.auth_type == AuthType::None {
+            let pb = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(Color::Indexed(238)));
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " No Authentication ",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .block(pb),
+                rows[4],
+            );
+        } else {
+            draw_auth_dialog_fields(frame, app, rows[4], theme, is_type_focused);
+        }
+    }
+
+    if ht > 0 {
+        let key = Style::default().fg(theme.teal).add_modifier(Modifier::BOLD);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(" ←/→ ", key),
+                Span::raw("select  "),
+                Span::styled(" Tab ", key),
+                Span::raw("inputs  "),
+                Span::styled(" Enter ", key),
+                Span::raw("confirm  "),
+                Span::styled(" Esc ", key),
+                Span::raw("close"),
+            ])),
+            rows[5],
+        );
+    }
+}
+
+fn draw_auth_dialog_fields(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    theme: Theme,
+    _is_type_focused: bool,
+) {
+    if area.height < 2 {
+        return;
+    }
+
+    let draft = app.current_draft();
+    let in_input_mode = app.input_mode;
+    let dialog = app.auth_dialog.as_ref().unwrap();
+    let is_field_focused = dialog.active_field == AuthDialogField::InputFields;
+
+    match draft.auth_type {
+        // -----------------------------------------------------------------
+        // Basic Auth  — needs: label(1) + input(3) + label(1) + input(3) = 8
+        // -----------------------------------------------------------------
+        AuthType::BasicAuth => {
+            if area.height < 5 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " ↕ Resize terminal to see fields",
+                        Style::default()
+                            .fg(theme.orange)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .alignment(Alignment::Center),
+                    area,
+                );
+                return;
+            }
+
+            let label_rows: u16 = 2;
+            let hint_row: u16 = if area.height >= 7 { 1 } else { 0 };
+            let input_space = area.height.saturating_sub(label_rows + hint_row);
+            let input1_h = (input_space / 2).max(1);
+            let input2_h = input_space.saturating_sub(input1_h).max(1);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),        // username label
+                    Constraint::Length(input1_h), // username input
+                    Constraint::Length(1),        // password label
+                    Constraint::Length(input2_h), // password input
+                    Constraint::Length(hint_row), // inline hint
+                    Constraint::Min(0),           // leftover
+                ])
+                .split(area);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Username",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                rows[0],
+            );
+
+            let username_focused = in_input_mode && is_field_focused && draft.active_col == 0;
+            let username_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(if username_focused {
+                    BorderType::Rounded
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(if username_focused {
+                    Style::default().fg(theme.yellow)
+                } else {
+                    Style::default().fg(Color::Indexed(238))
+                });
+            let username_line = if username_focused {
+                let len = draft.auth_username.text.len();
+                let cursor = draft.auth_username.cursor.min(len);
+                let before = &draft.auth_username.text[..cursor];
+                let after = &draft.auth_username.text[cursor..];
+                Line::from(vec![
+                    Span::raw(format!(" {}", before)),
+                    Span::styled(" ", Style::default().bg(Color::Indexed(238))),
+                    Span::raw(after.to_string()),
+                ])
+            } else {
+                let visible = if draft.auth_username.text.is_empty() {
+                    " username".to_string()
+                } else {
+                    format!(" {}", draft.auth_username.text)
+                };
+                Line::from(Span::styled(
+                    visible,
+                    if draft.auth_username.text.is_empty() {
+                        Style::default().fg(theme.comment)
+                    } else {
+                        Style::default().fg(theme.fg)
+                    },
+                ))
+            };
+            frame.render_widget(Paragraph::new(username_line).block(username_block), rows[1]);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Password",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                rows[2],
+            );
+
+            let password_focused = in_input_mode && is_field_focused && draft.active_col == 1;
+            let password_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(if password_focused {
+                    BorderType::Rounded
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(if password_focused {
+                    Style::default().fg(theme.yellow)
+                } else {
+                    Style::default().fg(Color::Indexed(238))
+                });
+            let password_line = if password_focused {
+                let len = draft.auth_password.text.len();
+                let cursor = draft.auth_password.cursor.min(len);
+                let before = "*".repeat(cursor);
+                let after = "*".repeat(len.saturating_sub(cursor));
+                Line::from(vec![
+                    Span::raw(format!(" {}", before)),
+                    Span::styled(" ", Style::default().bg(Color::Indexed(238))),
+                    Span::raw(after),
+                ])
+            } else {
+                let visible = if draft.auth_password.text.is_empty() {
+                    " password".to_string()
+                } else {
+                    format!(" {}", "*".repeat(draft.auth_password.text.len()))
+                };
+                Line::from(Span::styled(
+                    visible,
+                    if draft.auth_password.text.is_empty() {
+                        Style::default().fg(theme.comment)
+                    } else {
+                        Style::default().fg(theme.fg)
+                    },
+                ))
+            };
+            frame.render_widget(Paragraph::new(password_line).block(password_block), rows[3]);
+
+            if hint_row > 0 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " Tab move between fields   Esc close",
+                        Style::default().fg(theme.comment),
+                    )),
+                    rows[4],
+                );
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Bearer Token  — needs: label(1) + input(3) = 4
+        // -----------------------------------------------------------------
+        AuthType::BearerToken => {
+            if area.height < 3 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " ↕ Resize terminal to see fields",
+                        Style::default()
+                            .fg(theme.orange)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .alignment(Alignment::Center),
+                    area,
+                );
+                return;
+            }
+
+            let hint_row: u16 = if area.height >= 5 { 1 } else { 0 };
+            let input_h = area.height.saturating_sub(1 + hint_row).max(1);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),        // label
+                    Constraint::Length(input_h),  // input
+                    Constraint::Length(hint_row), // hint
+                    Constraint::Min(0),
+                ])
+                .split(area);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Token",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                rows[0],
+            );
+
+            let token_focused = in_input_mode && is_field_focused;
+            let token_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(if token_focused {
+                    BorderType::Rounded
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(if token_focused {
+                    Style::default().fg(theme.yellow)
+                } else {
+                    Style::default().fg(Color::Indexed(238))
+                });
+            let token_line = if token_focused {
+                let len = draft.auth_token.text.len();
+                let cursor = draft.auth_token.cursor.min(len);
+                let before = &draft.auth_token.text[..cursor];
+                let after = &draft.auth_token.text[cursor..];
+                Line::from(vec![
+                    Span::raw(format!(" {}", before)),
+                    Span::styled(" ", Style::default().bg(Color::Indexed(238))),
+                    Span::raw(after.to_string()),
+                ])
+            } else {
+                let visible = if draft.auth_token.text.is_empty() {
+                    " token".to_string()
+                } else {
+                    format!(" {}", draft.auth_token.text)
+                };
+                Line::from(Span::styled(
+                    visible,
+                    if draft.auth_token.text.is_empty() {
+                        Style::default().fg(theme.comment)
+                    } else {
+                        Style::default().fg(theme.fg)
+                    },
+                ))
+            };
+            frame.render_widget(Paragraph::new(token_line).block(token_block), rows[1]);
+
+            if hint_row > 0 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " Esc close",
+                        Style::default().fg(theme.comment),
+                    )),
+                    rows[2],
+                );
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // API Key  — needs: label(1) + input(3) + label(1) + input(3) = 8
+        // -----------------------------------------------------------------
+        AuthType::ApiKey => {
+            if area.height < 5 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " ↕ Resize terminal to see fields",
+                        Style::default()
+                            .fg(theme.orange)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .alignment(Alignment::Center),
+                    area,
+                );
+                return;
+            }
+
+            let label_rows: u16 = 2;
+            let hint_row: u16 = if area.height >= 7 { 1 } else { 0 };
+            let input_space = area.height.saturating_sub(label_rows + hint_row);
+            let input1_h = (input_space / 2).max(1);
+            let input2_h = input_space.saturating_sub(input1_h).max(1);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),        // header name label
+                    Constraint::Length(input1_h), // header name input
+                    Constraint::Length(1),        // header value label
+                    Constraint::Length(input2_h), // header value input
+                    Constraint::Length(hint_row), // hint
+                    Constraint::Min(0),
+                ])
+                .split(area);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Header Name",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                rows[0],
+            );
+
+            let header_focused = in_input_mode && is_field_focused && draft.active_col == 0;
+            let header_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(if header_focused {
+                    BorderType::Rounded
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(if header_focused {
+                    Style::default().fg(theme.yellow)
+                } else {
+                    Style::default().fg(Color::Indexed(238))
+                });
+            let header_line = if header_focused {
+                let len = draft.auth_header_name.text.len();
+                let cursor = draft.auth_header_name.cursor.min(len);
+                let before = &draft.auth_header_name.text[..cursor];
+                let after = &draft.auth_header_name.text[cursor..];
+                Line::from(vec![
+                    Span::raw(format!(" {}", before)),
+                    Span::styled(" ", Style::default().bg(Color::Indexed(238))),
+                    Span::raw(after.to_string()),
+                ])
+            } else {
+                let visible = if draft.auth_header_name.text.is_empty() {
+                    " header name".to_string()
+                } else {
+                    format!(" {}", draft.auth_header_name.text)
+                };
+                Line::from(Span::styled(
+                    visible,
+                    if draft.auth_header_name.text.is_empty() {
+                        Style::default().fg(theme.comment)
+                    } else {
+                        Style::default().fg(theme.fg)
+                    },
+                ))
+            };
+            frame.render_widget(Paragraph::new(header_line).block(header_block), rows[1]);
+
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Header Value",
+                    Style::default()
+                        .fg(theme.comment)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                rows[2],
+            );
+
+            let value_focused = in_input_mode && is_field_focused && draft.active_col == 1;
+            let value_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(if value_focused {
+                    BorderType::Rounded
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(if value_focused {
+                    Style::default().fg(theme.yellow)
+                } else {
+                    Style::default().fg(Color::Indexed(238))
+                });
+            let value_line = if value_focused {
+                let len = draft.auth_header_value.text.len();
+                let cursor = draft.auth_header_value.cursor.min(len);
+                let before = &draft.auth_header_value.text[..cursor];
+                let after = &draft.auth_header_value.text[cursor..];
+                Line::from(vec![
+                    Span::raw(format!(" {}", before)),
+                    Span::styled(" ", Style::default().bg(Color::Indexed(238))),
+                    Span::raw(after.to_string()),
+                ])
+            } else {
+                let visible = if draft.auth_header_value.text.is_empty() {
+                    " header value".to_string()
+                } else {
+                    format!(" {}", draft.auth_header_value.text)
+                };
+                Line::from(Span::styled(
+                    visible,
+                    if draft.auth_header_value.text.is_empty() {
+                        Style::default().fg(theme.comment)
+                    } else {
+                        Style::default().fg(theme.fg)
+                    },
+                ))
+            };
+            frame.render_widget(Paragraph::new(value_line).block(value_block), rows[3]);
+
+            if hint_row > 0 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " Tab move between fields   Esc close",
+                        Style::default().fg(theme.comment),
+                    )),
+                    rows[4],
+                );
+            }
+        }
+
+        AuthType::None => {}
     }
 }
 
