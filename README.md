@@ -54,7 +54,7 @@ Volt scans your current working directory and automatically detects routes from:
 
 **Customization**
 
-- **Themes**: Personalize Volt's look with built-in themes: `Vesper` (default), `Dracula`, `Gruvbox`, and `Tokyo-Night`.
+- **Themes**: Personalize Volt's look with built-in themes: `Vesper` (default), `Dracula`, `Gruvbox`, `Tokyo-Night`, `Catppuccin`, and `Poimandres`.
 - **Interactive Selector**: Run `volt --themes` to open an interactive menu and switch themes on the fly.
 - **Dynamic UI**: UI accents and the `VOLT` header automatically adapt to your chosen theme's primary color.
 - **Version Check**: Run `volt --version` or `volt -V` to check your current version.
@@ -66,7 +66,7 @@ Volt scans your current working directory and automatically detects routes from:
 
 **Persistence**
 
-- Custom routes saved to `.volt_routes.json` in your project root — routes and their base URLs survive restarts
+- Custom routes saved to `.volt_routes.json` in your project root — routes, base URLs, and hit counts survive restarts
 - App config stored in `.volt.toml`
 
 **Workflow**
@@ -119,7 +119,7 @@ volt
 cargo run
 ```
 
-volt scans the current working directory and lists detected routes. By default requests target `http://localhost:3000`; edit the base URL with `u`.
+Volt scans the current working directory and lists detected routes. By default requests target `http://localhost:3000`; edit the base URL with `u`.
 
 ## Keybindings
 
@@ -141,6 +141,50 @@ volt scans the current working directory and lists detected routes. By default r
 - Auth: raw `Authorization` header value, for example `Bearer <token>`
 - Body: JSON is validated automatically when the content starts with `{` or `[`.
 
+## Remote execution usage
+
+Volt supports SSH-based remote execution for APIs that are only reachable from internal networks.
+
+### What remote execution does
+- Runs HTTP requests from a remote machine via SSH
+- Helps you reach VPC-only APIs, private staging systems, and Kubernetes services
+- Keeps the UI and request editing workflow the same
+
+### Remote setup in `.volt.toml`
+
+```toml
+base_url = "http://localhost:3000"
+
+[remote.production]
+host = "prod-bastion.example.com"
+user = "ubuntu"
+port = 22
+identity = "~/.ssh/volt_prod"
+
+[remote.staging]
+host = "staging-internal.company.com"
+user = "deploy"
+port = 22
+identity = "~/.ssh/staging_key"
+```
+
+### Remote CLI usage
+
+```bash
+volt --remote-list
+volt --remote production
+volt --remote staging
+```
+
+If you select a remote profile, Volt uses the remote executor and shows it in the UI status bar.
+
+### Expected workflow
+1. Add remote profiles to `.volt.toml`
+2. Run `volt --remote production`
+3. Type an internal URL, such as `http://internal-api.svc.cluster.local/users`
+4. Press Enter to execute the request from the remote host
+5. Review the response in the TUI
+
 ## Limitations
 
 - Route discovery uses fast heuristics instead of full AST parsing.
@@ -150,5 +194,3 @@ volt scans the current working directory and lists detected routes. By default r
 ## In Queue Features:
 - Graph QL support
 - Graph based route discovery
-- SSH Remote Execution Mode (From inside VMs, Containers, staging nodes, pods, etc.)
--
