@@ -1,5 +1,3 @@
----
-
 # Remote Execution
 
 Volt can execute requests remotely over SSH.
